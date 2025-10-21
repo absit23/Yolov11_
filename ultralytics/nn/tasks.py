@@ -1666,7 +1666,10 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m is AMSFF: 
-            c2 = sum(ch[x] for x in f)
+            in_channels_list = [ch[x] for x in f]
+            c1 = sum(in_channels_list)
+            c2 = args[0]
+            args = [c1, c2, in_channels_list]
         elif m in frozenset(
             {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
         ):
