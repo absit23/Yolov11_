@@ -23,7 +23,9 @@ __all__ = (
     "CBAM",
     "Concat",
     "RepConv",
+    "AMSFF",
     "Index",
+    
 )
 
 
@@ -681,6 +683,72 @@ class Concat(nn.Module):
             (torch.Tensor): Concatenated tensor.
         """
         return torch.cat(x, self.d)
+class AMSFF(nn.Module):
+    """
+    Adaptive Multi-Scale Feature Fusion (AMSFF)
+    Replaces simple concatenation with learnable attention-based feature fusion.
+
+    This module takes multiple input feature maps (of possibly different scales),
+    aligns their channel dimensions, and fuses them adaptively using learned attention weights.
+
+    Attributes:
+        c (int): Number of output channels after fusion.
+        conv1x1 (nn.ModuleList): 1x1 convolutions to unify input channel dimensions.
+        fusion (nn.Conv2d): Learnable fusion layer for weighted combination.
+        attention (nn.Sequential): Lightweight channel-spatial attention block.
+    """
+
+    def __init__(self, in_channels, out_channels):
+        """
+        Initialize AMSFF module.
+
+        Args:
+            in_channels (list[int]): List of input channel sizes for each feature map.
+            out_channels (int): Desired number of output channels after fusion.
+        """
+        super().__init__()
+        self.num_inputs = len(in_channels)
+
+        # unify channels to same dimension
+        self.conv1x1 = nn.ModuleList([
+            nn.Conv2d(c, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
+            for c in in_channels
+        ])
+
+        # lightweight attention-based fusion
+        self.attention = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1, groups=out_channels, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.Sigmoid()
+        )
+
+        self.fusion = nn.Conv2d(out_channels, out_channels, 1, 1, 0, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x_list):
+        """
+        Forward pass of AMSFF.
+
+        Args:
+            x_list (list[torch.Tensor]): List of feature maps to fuse.
+
+        Returns:
+            (torch.Tensor): Adaptively fused feature map.
+        """
+        # Resize all features to the same spatial size (use the largest one)
+        target_size = x_list[0].shape[2:]
+        resized = [torch.nn.functional.interpolate(x, size=target_size, mode='nearest')
+                   if x.shape[2:] != target_size else x for x in x_list]
+
+        # Align channels and stack
+        unified = [conv(x) for conv, x in zip(self.conv1x1, resized)]
+        stacked = sum(unified) / self.num_inputs  # average initial fusion
+
+        # Apply adaptive attention fusion
+        att = self.attention(stacked)
+        fused = self.fusion(stacked * att)
+        return self.act(self.bn(fused))
 
 
 class Index(nn.Module):
