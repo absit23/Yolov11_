@@ -688,46 +688,35 @@ class Concat(nn.Module):
 
 
 class AMSFF(nn.Module):
-    """
-    Adaptive Multi-Scale Feature Fusion (AMSFF)
-    Replaces simple concatenation with learnable attention-based feature fusion.
-
-    This module takes multiple input feature maps (of possibly different scales),
-    aligns their channel dimensions, and fuses them adaptively using learned attention weights.
-
-    Attributes:
-        c (int): Number of output channels after fusion.
-        conv1x1 (nn.ModuleList): 1x1 convolutions to unify input channel dimensions.
-        fusion (nn.Conv2d): Learnable fusion layer for weighted combination.
-        attention (nn.Sequential): Lightweight channel-spatial attention block.
-    """
-
-    def __init__(self, in_channels, out_channels):
+    # Use the YOLO standard signature: c1 is total input channels (sum of list), 
+    # c2 is the desired output channels.
+    # The 'in_channels_list' is what you actually need, but it's not passed here.
+    # We must use c1, c2, and accept the list of inputs in the forward pass.
+    def __init__(self, c1, c2, in_channels_list): # <--- CRITICAL CHANGE: added in_channels_list
         """
         Initialize AMSFF module.
 
         Args:
-            in_channels (list[int]): List of input channel sizes for each feature map.
-            out_channels (int): Desired number of output channels after fusion.
+            c1 (int): Total combined input channels (sum of all incoming feature maps).
+            c2 (int): Desired number of output channels after fusion.
+            in_channels_list (list[int]): List of individual channel sizes for each feature map. 
+                                          This is crucial for the 1x1 convolutions.
         """
         super().__init__()
-        self.num_inputs = len(in_channels)
+        # ... (rest of your existing __init__ logic remains largely the same)
+        self.num_inputs = len(in_channels_list)
 
         # unify channels to same dimension
         self.conv1x1 = nn.ModuleList([
-            nn.Conv2d(c, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
-            for c in in_channels
+            # Use the passed list of channels here
+            nn.Conv2d(c, c2, kernel_size=1, stride=1, padding=0, bias=False) 
+            for c in in_channels_list # <--- Use the list here
         ])
-
-        # lightweight attention-based fusion
-        self.attention = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, 3, 1, 1, groups=out_channels, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.Sigmoid()
-        )
-
-        self.fusion = nn.Conv2d(out_channels, out_channels, 1, 1, 0, bias=False)
-        self.bn = nn.BatchNorm2d(out_channels)
+        
+        # ... rest of your existing __init__ ...
+        # Ensure c is replaced by c2 for the rest of your module definition
+        self.fusion = nn.Conv2d(c2, c2, 1, 1, 0, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
         self.act = nn.SiLU()
 
     def forward(self, x_list):
