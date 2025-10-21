@@ -8,6 +8,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 __all__ = (
     "Conv",
@@ -688,33 +689,33 @@ class Concat(nn.Module):
 
 
 class AMSFF(nn.Module):
-    # Use the YOLO standard signature: c1 is total input channels (sum of list), 
-    # c2 is the desired output channels.
-    # The 'in_channels_list' is what you actually need, but it's not passed here.
-    # We must use c1, c2, and accept the list of inputs in the forward pass.
-    def __init__(self, c1, c2, in_channels_list): # <--- CRITICAL CHANGE: added in_channels_list
+    def __init__(self, c1, c2, in_channels_list):
         """
         Initialize AMSFF module.
 
         Args:
             c1 (int): Total combined input channels (sum of all incoming feature maps).
             c2 (int): Desired number of output channels after fusion.
-            in_channels_list (list[int]): List of individual channel sizes for each feature map. 
-                                          This is crucial for the 1x1 convolutions.
+            in_channels_list (list[int]): List of individual channel sizes for each feature map.
         """
         super().__init__()
-        # ... (rest of your existing __init__ logic remains largely the same)
         self.num_inputs = len(in_channels_list)
 
-        # unify channels to same dimension
+        # 1. Unify channels to the same dimension (c2)
         self.conv1x1 = nn.ModuleList([
-            # Use the passed list of channels here
-            nn.Conv2d(c, c2, kernel_size=1, stride=1, padding=0, bias=False) 
-            for c in in_channels_list # <--- Use the list here
+            nn.Conv2d(c, c2, kernel_size=1, stride=1, padding=0, bias=False)
+            for c in in_channels_list
         ])
-        
-        # ... rest of your existing __init__ ...
-        # Ensure c is replaced by c2 for the rest of your module definition
+
+        # 2. DEFINE THE MISSING ATTENTION BLOCK (Crucial Fix)
+        self.attention = nn.Sequential(
+            # Lightweight channel-spatial attention (e.g., Depthwise Conv)
+            nn.Conv2d(c2, c2, 3, 1, 1, groups=c2, bias=False), 
+            nn.BatchNorm2d(c2),
+            nn.Sigmoid()
+        )
+
+        # 3. Final Fusion and Activation
         self.fusion = nn.Conv2d(c2, c2, 1, 1, 0, bias=False)
         self.bn = nn.BatchNorm2d(c2)
         self.act = nn.SiLU()
@@ -722,25 +723,22 @@ class AMSFF(nn.Module):
     def forward(self, x_list):
         """
         Forward pass of AMSFF.
-
-        Args:
-            x_list (list[torch.Tensor]): List of feature maps to fuse.
-
-        Returns:
-            (torch.Tensor): Adaptively fused feature map.
         """
-        # Resize all features to the same spatial size (use the largest one)
+        # 1. Resize all features to the same spatial size (use the largest one)
         target_size = x_list[0].shape[2:]
-        resized = [torch.nn.functional.interpolate(x, size=target_size, mode='nearest')
-                   if x.shape[2:] != target_size else x for x in x_list]
+        resized = [
+            F.interpolate(x, size=target_size, mode='nearest')
+            if x.shape[2:] != target_size else x for x in x_list
+        ]
 
-        # Align channels and stack
+        # 2. Align channels and stack (using an average initial fusion)
         unified = [conv(x) for conv, x in zip(self.conv1x1, resized)]
-        stacked = sum(unified) / self.num_inputs  # average initial fusion
+        stacked = sum(unified) / self.num_inputs
 
-        # Apply adaptive attention fusion
+        # 3. Apply adaptive attention fusion (This is where the error occurred before)
         att = self.attention(stacked)
         fused = self.fusion(stacked * att)
+        
         return self.act(self.bn(fused))
 
 
