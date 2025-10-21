@@ -40,6 +40,7 @@ from ultralytics.nn.modules import (
     CBLinear,
     Classify,
     Concat,
+    AMSFF,
     Conv,
     Conv2,
     ConvTranspose,
