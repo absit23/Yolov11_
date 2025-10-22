@@ -59,4 +59,4 @@ head:
   - [-1, 2, C3k2, [1024, True]] # 22 (P5 final, 1024ch)
     
   # Final Segment Head
-  - [[16, 19, 22], 1, Segment, [nc, 32, 256]]
+  - [[16, 19, 22], 1, Segment, [nc, 32, 1024]]
