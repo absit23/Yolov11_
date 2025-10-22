@@ -178,6 +178,7 @@ __all__ = (
     "Attention",
     "PSA",
     "TorchVision",
+    "ASFF",
     "Index",
     "A2C2f",
 )
