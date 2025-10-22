@@ -40,7 +40,7 @@ from ultralytics.nn.modules import (
     CBLinear,
     Classify,
     Concat,
-    AMSFF,
+    ASFF,
     Conv,
     Conv2,
     ConvTranspose,
@@ -1665,11 +1665,21 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m is AMSFF: 
+        elif m is ASFF:
+            # 1. Get the list of input channel counts from the layers 'f'
             in_channels_list = [ch[x] for x in f]
-            c1 = sum(in_channels_list)
-            c2 = args[0]
-            args = [c1, c2, in_channels_list]
+            
+            # 2. Extract YAML-provided arguments: [level, out_channels, rfb (optional), vis (optional)]
+            level = args[0]      # The first arg in YAML is 'level' (0, 1, or 2)
+            out_channels = args[1] # The second arg in YAML is 'out_channels'
+            
+            # 3. The output channel (c2) is the designated out_channels
+            c2 = out_channels
+            
+            # 4. Reconstruct the module arguments (args) in the correct order for ASFF.__init__
+            #    New structure: [level, in_channels_list, out_channels, rfb, vis]
+            #    We use *args[2:] to grab the optional rfb and vis flags
+            args = [level, in_channels_list, out_channels, *args[2:]]
         elif m in frozenset(
             {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
         ):
