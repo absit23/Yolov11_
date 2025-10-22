@@ -769,9 +769,9 @@ class ASFF(nn.Module):
         # Final 1x1 Conv to output 3 channels (one weight for each level)
         self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x_level_0, x_level_1, x_level_2):
+    def forward(self, x):
         # x_level_0 is P3, x_level_1 is P4, x_level_2 is P5 (based on common FPN output)
-        
+        x_level_0, x_level_1, x_level_2 = x
         # --- Step 1: Feature Alignment to Target Resolution (self.level) ---
         if self.level == 0:  # Target: P3 resolution
             level_0_resized = x_level_0 # P3 is already at target size
