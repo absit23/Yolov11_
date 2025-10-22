@@ -776,37 +776,55 @@ class ASFF(nn.Module):
         x_level_0, x_level_1, x_level_2 = x
         
         # 2. Channel Alignment (All features aligned to self.inter_dim)
+        # Assuming align_level_X maps from C_X to self.inter_dim (512, 256, etc.)
         level_0_aligned = self.align_level_0(x_level_0)
         level_1_aligned = self.align_level_1(x_level_1)
         level_2_aligned = self.align_level_2(x_level_2)
         
         # 3. Spatial Resizing to Target Resolution (self.level)
-        
-        if self.level == 2:  # Target: L2 (P5)
-            target_size = x_level_2.shape[-2:]
-            level_0_resized = F.interpolate(level_0_aligned, size=target_size, mode='nearest')
-            level_1_resized = F.interpolate(level_1_aligned, size=target_size, mode='nearest')
-            level_2_resized = level_2_aligned
 
-        elif self.level == 1:  # Target: L1 (P4)
+        if self.level == 2:  # Target: L2 (P5/Coarsest)
+            target_size = x_level_2.shape[-2:]
+            
+            # L0 (P3) -> L2 (P5) - 4x Downsample
+            level_0_resized = F.interpolate(level_0_aligned, size=target_size, mode='nearest')
+            
+            # L1 (P4) -> L2 (P5) - 2x Downsample
+            level_1_resized = F.interpolate(level_1_aligned, size=target_size, mode='nearest')
+            
+            level_2_resized = level_2_aligned # L2 is target
+
+        elif self.level == 1:  # Target: L1 (P4/Medium)
             target_size = x_level_1.shape[-2:]
-            level_0_resized = F.max_pool2d(level_0_aligned, 2, stride=2, padding=0)
-            level_1_resized = level_1_aligned
+            
+            # L0 (P3) -> L1 (P4) - 2x Downsample
+            level_0_resized = F.interpolate(level_0_aligned, size=target_size, mode='nearest')
+            
+            level_1_resized = level_1_aligned # L1 is target
+            
+            # L2 (P5) -> L1 (P4) - 2x Upsample
             level_2_resized = F.interpolate(level_2_aligned, size=target_size, mode='nearest')
 
-        elif self.level == 0:  # Target: L0 (P3)
+        elif self.level == 0:  # Target: L0 (P3/Finest)
             target_size = x_level_0.shape[-2:]
-            level_0_resized = level_0_aligned
+            
+            level_0_resized = level_0_aligned # L0 is target
+            
+            # L1 (P4) -> L0 (P3) - 2x Upsample
             level_1_resized = F.interpolate(level_1_aligned, size=target_size, mode='nearest')
+            
+            # L2 (P5) -> L0 (P3) - 4x Upsample
             level_2_resized = F.interpolate(level_2_aligned, size=target_size, mode='nearest')
             
         # --- Step 4: Adaptive Weight Calculation ---
-        # All inputs here have self.inter_dim channels, resolving the RuntimeError.
+        # All inputs are now guaranteed to have the same spatial size (target_size)
         level_0_weight_v = self.weight_level_0(level_0_resized)
         level_1_weight_v = self.weight_level_1(level_1_resized)
         level_2_weight_v = self.weight_level_2(level_2_resized)
 
+        # THIS CONCATENATION WILL NOW WORK 
         levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v), 1)
+        # ... (rest of the forward pass)
         
         levels_weight = self.weight_levels(levels_weight_v)
         levels_weight = F.softmax(levels_weight, dim=1)
