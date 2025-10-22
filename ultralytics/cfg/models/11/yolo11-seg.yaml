@@ -34,12 +34,12 @@ head:  # ⬅️ **FIX:** Removed the leading space. This must be flush left.
   # ---------------------------------- Up-sample Path ----------------------------------
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 11 (P5 upsampled)
   # 12 (P4 Fusion): Fuses [L11 (P5 up), L6 (P4 processed), L3 (P3 backbone)]
-  - [[-1, 6, 3], 1, ASFF, [1, 512]] # ⬅️ **FIX:** Added the 3rd input (L3)
+  - [[3, 6, -1], 1, ASFF, [1, 512]]
   - [-1, 2, C3k2, [512, False]] # 13 (P4 processed)
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 14 (P4 upsampled)
   # 15 (P3 Fusion): Fuses [L14 (P4 up), L6 (P4 processed), L3 (P3 backbone)]
-  - [[-1, 6, 3], 1, ASFF, [2, 256]] # ⬅️ **FIX:** Added the 3rd input (L3)
+  - [[3, 6, -1], 1, ASFF, [2, 256]]
   - [-1, 2, C3k2, [256, False]] # 16 (P3/8-small, P3 final)
 
   # ---------------------------------- Down-sample Path ----------------------------------
