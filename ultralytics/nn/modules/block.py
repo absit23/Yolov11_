@@ -88,22 +88,28 @@ class Proto(nn.Module):
     def __init__(self, c1: int, c_: int = 256, c2: int = 32):
         """
         Initialize the Ultralytics YOLO models mask Proto module with specified number of protos and masks.
-
-        Args:
-            c1 (int): Input channels.
-            c_ (int): Intermediate channels.
-            c2 (int): Output channels (number of protos).
         """
         super().__init__()
         self.cv1 = Conv(c1, c_, k=3)
-        self.upsample = nn.ConvTranspose2d(c_, c_, 2, 2, 0, bias=True)  # nn.Upsample(scale_factor=2, mode='nearest')
+        
+        # --- FIX: Two sequential upsampling layers for 4x total upsampling (2x * 2x) ---
+        # 1. First 2x upsample
+        self.upsample1 = nn.ConvTranspose2d(c_, c_, kernel_size=2, stride=2, padding=0, bias=True) 
+        # 2. Second 2x upsample (New layer)
+        self.upsample2 = nn.ConvTranspose2d(c_, c_, kernel_size=2, stride=2, padding=0, bias=True)
+        # --- END FIX ---
+        
         self.cv2 = Conv(c_, c_, k=3)
         self.cv3 = Conv(c_, c2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform a forward pass through layers using an upsampled input image."""
-        return self.cv3(self.cv2(self.upsample(self.cv1(x))))
-
+        x = self.cv1(x)
+        # Apply the sequential 4x upsampling
+        x = self.upsample1(x)
+        x = self.upsample2(x)
+        
+        return self.cv3(self.cv2(x))
 
 class HGStem(nn.Module):
     """
