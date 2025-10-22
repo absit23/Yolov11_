@@ -706,17 +706,21 @@ def add_conv(c1, c2, k, s, p=None, g=1, d=1, act=True):
 # STEP 2: The Adaptive Spatial Feature Fusion (ASFF) Module
 # ----------------------------------------------------------------------
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+
 
 # NOTE: 'add_conv' must be defined or imported elsewhere in your code, 
 # as it's assumed to be a function that builds a Conv module (like a C2f block's Conv or a standard Conv/BN/Act block).
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# NOTE: The 'add_conv' function (likely an alias for Conv/C2f, etc.) must be defined/imported externally
+
 class ASFF(nn.Module):
     """
     Adaptive Spatial Feature Fusion (ASFF) module for three-scale feature aggregation (P3, P4, P5).
-    This implementation matches the three-input configuration in the YAML.
+    Correctly implements channel alignment for all three inputs before fusion.
     """
     def __init__(self, level, in_channels_list, out_channels, rfb=False, vis=False):
         super(ASFF, self).__init__()
@@ -724,37 +728,40 @@ class ASFF(nn.Module):
         self.vis = vis
         
         # --- Channel Configuration for THREE Inputs ---
-        # in_channels_list will contain 3 values (e.g., [256, 512, 1024])
-        C0, C1, C2 = in_channels_list  # <-- FIX: Must unpack 3 values
+        C0, C1, C2 = in_channels_list 
         self.inter_dim = out_channels  
         
         # --- Alignment Layers Setup ---
-        
-        # NOTE: The YAML configuration passes features in the order: P3, P4, P5 (by channel size)
-        # L0 = P3 (Finest), L1 = P4 (Medium), L2 = P5 (Coarsest)
+        # ALL THREE features must have an alignment Conv to map to self.inter_dim
 
-        if level == 2:  # Target: L2 (P5/Coarsest resolution)
-            # L0 (P3) -> L2 (4x Up)
-            self.compress_level_0 = add_conv(C0, self.inter_dim, 1, 1)
-            # L1 (P4) -> L2 (2x Up)
-            self.compress_level_1 = add_conv(C1, self.inter_dim, 1, 1)  
+        # Alignment for L0 (P3/256ch) - Used when L1 or L2 is the target
+        self.align_level_0 = add_conv(C0, self.inter_dim, 1, 1)
+
+        # Alignment for L1 (P4/512ch) - Used when L0 or L2 is the target
+        self.align_level_1 = add_conv(C1, self.inter_dim, 1, 1) 
+
+        # Alignment for L2 (P5/1024ch) - Used when L0 or L1 is the target
+        self.align_level_2 = add_conv(C2, self.inter_dim, 1, 1)
+
+        # --- Spatial Transformation Layers (Only for inputs that are NOT the target) ---
         
-        elif level == 1:  # Target: L1 (P4/Medium resolution)
-            # L0 (P3) -> L1 (2x Down)
-            self.align_level_0 = add_conv(C0, self.inter_dim, 1, 1)
-            # L2 (P5) -> L1 (2x Down)
-            self.stride_level_2 = add_conv(C2, self.inter_dim, 3, 2)
+        if level == 2:  # Target: L2 (P5/Coarsest)
+            # L0 -> L2 (4x Up) and L1 -> L2 (2x Up) are done via F.interpolate in forward
+            pass 
+        
+        elif level == 1:  # Target: L1 (P4/Medium)
+            # L0 -> L1 (2x Down) is MaxPool in forward
+            # L2 -> L1 (2x Up) is F.interpolate in forward
+            pass
             
-        elif level == 0:  # Target: L0 (P3/Finest resolution)
-            # L1 (P4) -> L0 (2x Down)
-            self.stride_level_1 = add_conv(C1, self.inter_dim, 3, 2)
-            # L2 (P5) -> L0 (4x Down: MaxPool & Conv)
-            self.stride_level_2 = add_conv(C2, self.inter_dim, 3, 2)
-
-
+        elif level == 0:  # Target: L0 (P3/Finest)
+            # L1 -> L0 (2x Down) is MaxPool in forward
+            # L2 -> L0 (4x Down) is MaxPool + MaxPool/Conv in forward
+            pass
+            
         self.expand = add_conv(self.inter_dim, out_channels, 3, 1)
 
-        # --- Weight Learning Layers (Now 3) ---
+        # --- Weight Learning Layers (Expects self.inter_dim channels) ---
         compress_c = 8 if rfb else 16 
         
         self.weight_level_0 = add_conv(self.inter_dim, compress_c, 1, 1)
@@ -765,58 +772,57 @@ class ASFF(nn.Module):
         self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
-        # 💡 FIX: Unpack the input 'x' into 3 feature tensors
-        x_level_0, x_level_1, x_level_2 = x # <-- FIX: Must unpack 3 tensors
+        # 1. Unpack features
+        x_level_0, x_level_1, x_level_2 = x
         
-        # --- Step 1: Feature Alignment to Target Resolution (self.level) ---
+        # 2. Channel Alignment (All features aligned to self.inter_dim)
+        level_0_aligned = self.align_level_0(x_level_0)
+        level_1_aligned = self.align_level_1(x_level_1)
+        level_2_aligned = self.align_level_2(x_level_2)
         
-        if self.level == 2:  # Target: P5 resolution (L2)
-            # P3 -> P5 (4x Up: Compress 1x1 then Interpolate)
-            level_0_compressed = self.compress_level_0(x_level_0)
-            level_0_resized = F.interpolate(level_0_compressed, scale_factor=4, mode='nearest')
-            # P4 -> P5 (2x Up: Compress 1x1 then Interpolate)
-            level_1_compressed = self.compress_level_1(x_level_1) 
-            level_1_resized = F.interpolate(level_1_compressed, scale_factor=2, mode='nearest')
-            level_2_resized = x_level_2 # P5 is already at target size
-            
-        elif self.level == 1:  # Target: P4 resolution (L1)
-            # P3 -> P4 (2x Down: Align 1x1 then MaxPool/Conv)
-            level_0_aligned = self.align_level_0(x_level_0)
-            level_0_resized = F.max_pool2d(level_0_aligned, 2, stride=2, padding=0)
-            level_1_resized = x_level_1 # P4 is already at target size
-            # P5 -> P4 (2x Down)
-            level_2_resized = self.stride_level_2(x_level_2) 
+        # 3. Spatial Resizing to Target Resolution (self.level)
+        
+        if self.level == 2:  # Target: L2 (P5)
+            target_size = x_level_2.shape[-2:]
+            level_0_resized = F.interpolate(level_0_aligned, size=target_size, mode='nearest')
+            level_1_resized = F.interpolate(level_1_aligned, size=target_size, mode='nearest')
+            level_2_resized = level_2_aligned
 
-        elif self.level == 0:  # Target: P3 resolution (L0)
-            level_0_resized = x_level_0 # P3 is already at target size
-            level_1_resized = self.stride_level_1(x_level_1) # P4 -> P3 (2x Down)
-            # P5 -> P3 (4x Down: MaxPool 2x then Conv 2x)
-            level_2_downsampled_inter = F.max_pool2d(x_level_2, 3, stride=2, padding=1)
-            level_2_resized = self.stride_level_2(level_2_downsampled_inter)
+        elif self.level == 1:  # Target: L1 (P4)
+            target_size = x_level_1.shape[-2:]
+            level_0_resized = F.max_pool2d(level_0_aligned, 2, stride=2, padding=0)
+            level_1_resized = level_1_aligned
+            level_2_resized = F.interpolate(level_2_aligned, size=target_size, mode='nearest')
+
+        elif self.level == 0:  # Target: L0 (P3)
+            target_size = x_level_0.shape[-2:]
+            level_0_resized = level_0_aligned
+            level_1_resized = F.interpolate(level_1_aligned, size=target_size, mode='nearest')
+            level_2_resized = F.interpolate(level_2_aligned, size=target_size, mode='nearest')
             
-        # --- Step 2: Adaptive Weight Calculation ---
+        # --- Step 4: Adaptive Weight Calculation ---
+        # All inputs here have self.inter_dim channels, resolving the RuntimeError.
         level_0_weight_v = self.weight_level_0(level_0_resized)
         level_1_weight_v = self.weight_level_1(level_1_resized)
-        level_2_weight_v = self.weight_level_2(level_2_resized) # <-- FIX: Include L2 weight
+        level_2_weight_v = self.weight_level_2(level_2_resized)
 
         levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v), 1)
         
         levels_weight = self.weight_levels(levels_weight_v)
         levels_weight = F.softmax(levels_weight, dim=1)
 
-        # --- Step 3: Weighted Sum Fusion ---
+        # --- Step 5: Weighted Sum Fusion ---
         fused_out_reduced = level_0_resized * levels_weight[:, 0:1, :, :] + \
                             level_1_resized * levels_weight[:, 1:2, :, :] + \
-                            level_2_resized * levels_weight[:, 2:, :, :] # <-- FIX: Include L2 fusion
+                            level_2_resized * levels_weight[:, 2:, :, :]
 
-        # --- Step 4: Final Expansion/Refinement ---
+        # --- Step 6: Final Expansion/Refinement ---
         out = self.expand(fused_out_reduced)
 
         if self.vis:
             return out, levels_weight, fused_out_reduced.sum(dim=1)
         else:
             return out
-
 class Index(nn.Module):
     """
     Returns a particular index of the input.
