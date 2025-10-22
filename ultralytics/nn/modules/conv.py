@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ultralytics.nn.modules import Conv
 __all__ = (
     "Conv",
     "Conv2",
