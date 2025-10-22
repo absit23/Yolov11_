@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from ultralytics.nn.modules import Conv
 __all__ = (
     "Conv",
     "Conv2",
@@ -707,103 +707,103 @@ def add_conv(c1, c2, k, s, p=None, g=1, d=1, act=True):
 # STEP 2: The Adaptive Spatial Feature Fusion (ASFF) Module
 # ----------------------------------------------------------------------
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# NOTE: 'add_conv' must be defined or imported elsewhere in your code, 
+# as it's assumed to be a function that builds a Conv module (like a C2f block's Conv or a standard Conv/BN/Act block).
+
 class ASFF(nn.Module):
     """
-    Adaptive Spatial Feature Fusion (ASFF) module for multi-scale feature aggregation.
-    Replaces simple concatenation by learning spatial-wise weights for each scale level.
+    Simplified Adaptive Spatial Feature Fusion (ASFF) module for two-scale feature aggregation.
+    Designed to replace the two-input Concat operations in a standard YOLO head.
     """
     def __init__(self, level, in_channels_list, out_channels, rfb=False, vis=False):
         super(ASFF, self).__init__()
         self.level = level
         self.vis = vis
         
-        # ⚠️ CHANNELS TO VERIFY ⚠️
-        # in_channels_list: [P3_IN_C, P4_IN_C, P5_IN_C] 
-        # out_channels: The target output channel count for the fused feature map 
-        #               (e.g., P3_OUT_C if level=0)
+        # --- Channel Configuration for Two Inputs ---
+        # in_channels_list must now have only 2 elements: [C_A, C_B]
+        # We assume C0 is the lowest resolution feature and C1 is the next lowest (P4 and P5, or P3 and P4).
+        C0, C1 = in_channels_list  
+        self.inter_dim = out_channels  # All aligned features will be this channel size
 
-        # The ASFF paper typically fuses P5, P4, P3 features. 
-        # To match the inputs x_level_0, x_level_1, x_level_2 in the forward pass, 
-        # we assume a structure where inputs are ordered by size, coarsest first 
-        # (similar to the logic in the original code, but we use the list index).
+        # The level variable now only needs to distinguish between fusion points.
+        # We will simplify 'level' to 0 (fusing P3/P4) and 1 (fusing P4/P5).
         
-        # For simplicity, we define the input channels corresponding to the levels 0, 1, 2
-        # Level 0 (P3/Finest) -> Level 1 (P4/Medium) -> Level 2 (P5/Coarsest)
-        # We assume the forward inputs x_level_0, x_level_1, x_level_2 are P3, P4, P5 respectively 
-        # in terms of spatial size, as is typical for the FPN output layers.
-        # This means the *target* feature map is P3 when level=0, P4 when level=1, P5 when level=2.
+        if level == 0:  # Target: P4 or P3 resolution (Assuming C1 is the target level)
+            # Alignment for the feature coarser than the target (C0 -> C1)
+            # This is typically needed for the Down-sample Path (P4 fusion of P3-down and P4) 
+            # or Up-sample Path (P4 fusion of P5-up and P4).
+            
+            # Since both C0 and C1 could be either P3 or P4, we generalize:
+            # Assume C0 is the feature needing resizing, C1 is the target.
+            
+            # --- Alignment Layer for Input 0 (C0) ---
+            # If C0 is coarser than C1, it needs upsampling (e.g., P4 -> P3)
+            # If C0 is finer than C1, it needs downsampling (e.g., P3 -> P4 or P4 -> P5)
+
+            # We'll use a 1x1 Conv to align channels before any up/down-sampling.
+            self.align_level_0 = add_conv(C0, self.inter_dim, 1, 1)
+
+        elif level == 1: # Target: P5 or P4 resolution (Only one generic alignment layer needed)
+            # Same alignment logic, just named differently if needed, but keeping one alignment layer 
+            # for the input that is not the target level.
+            self.align_level_0 = add_conv(C0, self.inter_dim, 1, 1)
+
+
+        self.expand = add_conv(self.inter_dim, out_channels, 3, 1)
+
+        # --- Weight Learning Layers (Now only 2) ---
+        compress_c = 8 if rfb else 16 
         
-        # --- Channel Configuration ---
-        C0, C1, C2 = in_channels_list # [Channels for P3, P4, P5 inputs]
-        self.inter_dim = out_channels # All aligned features will be this channel size
-
-        if level == 0:  # Target: P3 (Finest, largest resolution)
-            # Level 1 (P4) -> Downsample 2x
-            self.stride_level_1 = add_conv(C1, self.inter_dim, 3, 2)
-            # Level 2 (P5) -> Downsample 4x (via MaxPool & Conv)
-            self.stride_level_2 = add_conv(C2, self.inter_dim, 3, 2)
-            self.expand = add_conv(self.inter_dim, out_channels, 3, 1)
-
-        elif level == 1:  # Target: P4 (Medium resolution)
-            # Level 0 (P3) -> Compress 1x1 before Upsample 2x
-            self.compress_level_0 = add_conv(C0, self.inter_dim, 1, 1)
-            # Level 2 (P5) -> Downsample 2x
-            self.stride_level_2 = add_conv(C2, self.inter_dim, 3, 2)
-            self.expand = add_conv(self.inter_dim, out_channels, 3, 1)
-
-        elif level == 2:  # Target: P5 (Coarsest, smallest resolution)
-            # Level 0 (P3) -> Compress 1x1 before Upsample 4x
-            self.compress_level_0 = add_conv(C0, self.inter_dim, 1, 1)
-            # Level 1 (P4) -> Compress 1x1 before Upsample 2x (This layer was implicitly missing, added for consistency)
-            self.compress_level_1 = add_conv(C1, self.inter_dim, 1, 1) 
-            self.expand = add_conv(self.inter_dim, out_channels, 3, 1)
-
-        # --- Weight Learning Layers ---
-        compress_c = 8 if rfb else 16  # when adding rfb, use half channels to save memory
-        
-        # 1x1 convolutions to reduce channel depth before concatenation for Softmax weights
+        # 1x1 convolutions to reduce channel depth
         self.weight_level_0 = add_conv(self.inter_dim, compress_c, 1, 1)
         self.weight_level_1 = add_conv(self.inter_dim, compress_c, 1, 1)
-        self.weight_level_2 = add_conv(self.inter_dim, compress_c, 1, 1)
 
-        # Final 1x1 Conv to output 3 channels (one weight for each level)
-        self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, padding=0)
+        # Final 1x1 Conv to output 2 channels (one weight for each level)
+        self.weight_levels = nn.Conv2d(compress_c * 2, 2, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
-        # x_level_0 is P3, x_level_1 is P4, x_level_2 is P5 (based on common FPN output)
-        x_level_0, x_level_1, x_level_2 = x
-        # --- Step 1: Feature Alignment to Target Resolution (self.level) ---
-        if self.level == 0:  # Target: P3 resolution
-            level_0_resized = x_level_0 # P3 is already at target size
-            level_1_resized = self.stride_level_1(x_level_1) # P4 -> P3 (2x Down)
+        # 💡 FIX: Unpack the single input 'x' (which is a list/tuple of 2 tensors)
+        x_level_0, x_level_1 = x 
+        
+        # --- Step 1: Feature Alignment to Target Resolution ---
+        
+        # Since we don't know the exact P-level (P3, P4, P5) based on 'level' alone 
+        # (because only 2 features are fused), we have to rely on the input resolution.
+        
+        # Determine the target size (B, C, H, W) from the first input tensor in the list 'x'.
+        # We will assume x_level_1 is always the target feature map in the YOLO PAN structure.
+        target_size = x_level_1.shape[-2:]
+        
+        # Align x_level_0 to the target size (x_level_1 size)
+        level_0_aligned = self.align_level_0(x_level_0)
+        
+        # Resizing (Interpolation or Downsampling) based on relative size
+        if level_0_aligned.shape[-2:] != target_size:
+            # Check if we need upsampling or downsampling
+            if level_0_aligned.shape[-2] < target_size[0]:
+                # x_level_0 is smaller (e.g., P4 fusing with P3) -> Upsample
+                level_0_resized = F.interpolate(level_0_aligned, size=target_size, mode='nearest')
+            else:
+                # x_level_0 is larger (e.g., P3 fusing with P4) -> Downsample 
+                # Use MaxPool and a Conv (or just a Conv with stride=2, depending on 'add_conv')
+                level_0_resized = F.max_pool2d(level_0_aligned, 2, stride=2, padding=0) # Simple 2x downsample
 
-            # P5 -> P3 (4x Down: MaxPool 2x then Conv 2x)
-            level_2_downsampled_inter = F.max_pool2d(x_level_2, 3, stride=2, padding=1)
-            level_2_resized = self.stride_level_2(level_2_downsampled_inter)
-
-        elif self.level == 1:  # Target: P4 resolution
-            # P3 -> P4 (2x Up: Compress 1x1 then Interpolate)
-            level_0_compressed = self.compress_level_0(x_level_0)
-            level_0_resized = F.interpolate(level_0_compressed, scale_factor=2, mode='nearest')
-            level_1_resized = x_level_1 # P4 is already at target size
-            level_2_resized = self.stride_level_2(x_level_2) # P5 -> P4 (2x Down)
-
-        elif self.level == 2:  # Target: P5 resolution
-            # P3 -> P5 (4x Up: Compress 1x1 then Interpolate)
-            level_0_compressed = self.compress_level_0(x_level_0)
-            level_0_resized = F.interpolate(level_0_compressed, scale_factor=4, mode='nearest')
-            # P4 -> P5 (2x Up: Compress 1x1 then Interpolate)
-            level_1_compressed = self.compress_level_1(x_level_1) # Using the added layer
-            level_1_resized = F.interpolate(level_1_compressed, scale_factor=2, mode='nearest')
-            level_2_resized = x_level_2 # P5 is already at target size
+        else:
+            level_0_resized = level_0_aligned
+            
+        level_1_resized = x_level_1 # Target feature is used directly
         
         # --- Step 2: Adaptive Weight Calculation ---
         level_0_weight_v = self.weight_level_0(level_0_resized)
         level_1_weight_v = self.weight_level_1(level_1_resized)
-        level_2_weight_v = self.weight_level_2(level_2_resized)
         
         # Concatenate intermediate weights
-        levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v), 1)
+        levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v), 1)
         
         # Final Softmax weights (sum to 1 spatially)
         levels_weight = self.weight_levels(levels_weight_v)
@@ -811,8 +811,7 @@ class ASFF(nn.Module):
 
         # --- Step 3: Weighted Sum Fusion ---
         fused_out_reduced = level_0_resized * levels_weight[:, 0:1, :, :] + \
-                            level_1_resized * levels_weight[:, 1:2, :, :] + \
-                            level_2_resized * levels_weight[:, 2:, :, :]
+                            level_1_resized * levels_weight[:, 1:2, :, :]
 
         # --- Step 4: Final Expansion/Refinement ---
         out = self.expand(fused_out_reduced)
@@ -822,7 +821,6 @@ class ASFF(nn.Module):
             return out, levels_weight, fused_out_reduced.sum(dim=1)
         else:
             return out
-
 
 class Index(nn.Module):
     """
