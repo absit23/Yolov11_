@@ -74,7 +74,7 @@ from .conv import (
     Index,
     LightConv,
     RepConv,
-    AMSFF, 
+    ASFF, 
     SpatialAttention,
 )
 from .head import (
