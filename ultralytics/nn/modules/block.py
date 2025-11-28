@@ -2044,7 +2044,7 @@ class BottleneckLSK(nn.Module):
     def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
         super().__init__()
         from ultralytics.utils.ops import make_divisible
-        c_ = make_divisible(c2 * e)  # hidden channels
+        c_ = make_divisible(c2 * e, 8)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1) # 1x1
         self.cv2 = Conv(c_, c2, 3, 1, g=g) # 3x3
         self.lsk = LSK(c2) # Apply LSK after 3x3 conv
@@ -2064,7 +2064,7 @@ class C3k2_LSK(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
         super().__init__()
         from ultralytics.utils.ops import make_divisible
-        c_ = make_divisible(c2 * e)  # hidden channels
+        c_ = make_divisible(c2 * e, 8)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1) # Main branch Conv 1
         self.cv2 = Conv(c1, c_, 1, 1) # Shortcut branch Conv 1
         self.cv3 = Conv(2 * c_, c2, 1, 1) # Final concatenation Conv
