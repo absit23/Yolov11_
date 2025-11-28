@@ -1987,6 +1987,7 @@ class LSK(nn.Module):
     """
     def __init__(self, dim):
         super().__init__()
+        dim = int(dim)
         # 5x5 Depth-wise Conv
         self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
         # 7x7 Dilated Depth-wise Conv (Dilation=3 -> effective 13x13)
@@ -2043,6 +2044,8 @@ class BottleneckLSK(nn.Module):
     """
     def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
         super().__init__()
+        c1 = int(c1) # <--- CRITICAL FIX
+        c2 = int(c2) # <--- CRITICAL FIX
         from ultralytics.utils.ops import make_divisible
         c_ = make_divisible(c2 * e, 8)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1) # 1x1
@@ -2061,8 +2064,11 @@ class C3k2_LSK(nn.Module):
     C3 Module with Large Selective Kernel (LSK) attention in its bottlenecks,
     using the k=2 structure (two Conv layers in the shortcut branch).
     """
+
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
         super().__init__()
+        c1 = int(c1) # <--- CRITICAL FIX
+        c2 = int(c2) # <--- CRITICAL FIX
         from ultralytics.utils.ops import make_divisible
         c_ = make_divisible(c2 * e, 8)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1) # Main branch Conv 1
