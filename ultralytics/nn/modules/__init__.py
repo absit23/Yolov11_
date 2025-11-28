@@ -58,6 +58,9 @@ from .block import (
     RepVGGDW,
     ResNetLayer,
     SCDown,
+    LSK,
+    BottleneckLSK,
+    C3k2_LSK,
     TorchVision,
 )
 from .conv import (
@@ -181,4 +184,7 @@ __all__ = (
     "ASFF",
     "Index",
     "A2C2f",
+    "LSK",
+    "BottleneckLSK",
+    "C3k2_LSK",
 )
