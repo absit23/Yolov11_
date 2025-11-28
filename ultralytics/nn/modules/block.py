@@ -1985,6 +1985,8 @@ class LSK(nn.Module):
     LSK performs spatial feature selection using multiple branches of depth-wise
     convolutions with large kernels and dilation.
     """
+
+    
     def __init__(self, dim):
         super().__init__()
         dim = int(dim)
@@ -2077,8 +2079,13 @@ class C3k2_LSK(nn.Module):
         self.m = nn.Sequential(*(BottleneckLSK(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
         self.cv4 = Conv(c_, c_, 3, 1) # Shortcut branch Conv 2
 
+    #def forward(self, x):
+        #return self.cv3(torch.cat((self.cv4(self.cv2(x)), self.m(self.cv1(x))), 1))
+
     def forward(self, x):
-        return self.cv3(torch.cat((self.cv4(self.cv2(x)), self.m(self.cv1(x))), 1))
+        branch_main = self.m(self.cv1(x))
+        branch_shortcut = self.cv4(self.cv2(x))
+        return self.cv3(torch.cat((branch_shortcut, branch_main), 1))
 
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
