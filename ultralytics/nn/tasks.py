@@ -9,7 +9,6 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from ultralytics.nn.modules.block import C3k2_LSK, BottleneckLSK, LSK 
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
     AIFI,
@@ -41,6 +40,9 @@ from ultralytics.nn.modules import (
     Classify,
     Concat,
     ASFF,
+    C3k2_LSK,
+    BottleneckLSK,
+    LSK,
     Conv,
     Conv2,
     ConvTranspose,
