@@ -6,7 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from ultralytics.nn.modules.conv import Conv
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
@@ -1979,6 +1979,7 @@ class Residual(nn.Module):
         return x + self.m(x)
 
 #new guest here:)
+
 class LSK(nn.Module):
     """
     Large Selective Kernel (LSK) Attention Module.
@@ -1986,39 +1987,51 @@ class LSK(nn.Module):
     def __init__(self, dim):
         super().__init__()
         dim = int(dim)
+        
+        # CRITICAL: Ensure dim is valid
+        if dim <= 0:
+            raise ValueError(f"LSK dimension must be positive, got {dim}")
+        
+        # Depthwise convolutions
         self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
         self.conv_spatial = nn.Conv2d(dim, dim, 7, stride=1, padding=9, groups=dim, dilation=3)
-        self.conv1 = nn.Conv2d(dim, dim // 2, 1)
-        self.conv2 = nn.Conv2d(dim, dim // 2, 1)
+        
+        # Channel reduction for efficiency
+        dim_half = max(1, dim // 2)  # Ensure at least 1 channel
+        self.conv1 = nn.Conv2d(dim, dim_half, 1)
+        self.conv2 = nn.Conv2d(dim, dim_half, 1)
         self.conv_squeeze = nn.Conv2d(2, 2, 7, padding=3)
-        self.conv = nn.Conv2d(dim // 2, dim, 1)
+        self.conv = nn.Conv2d(dim_half, dim, 1)
 
     def forward(self, x):
         attn1_base = self.conv0(x)
         attn2_base = self.conv_spatial(attn1_base)
         attn1 = self.conv1(attn1_base)
         attn2 = self.conv2(attn2_base)
+        
         attn_cat = torch.cat([attn1, attn2], dim=1)
         avg_attn = torch.mean(attn_cat, dim=1, keepdim=True)
         max_attn, _ = torch.max(attn_cat, dim=1, keepdim=True)
+        
         agg = torch.cat([avg_attn, max_attn], dim=1)
         sig = self.conv_squeeze(agg).sigmoid()
-        attn = attn1 * sig[:, 0, :, :].unsqueeze(1) + attn2 * sig[:, 1, :, :].unsqueeze(1)
+        
+        attn = attn1 * sig[:, 0:1] + attn2 * sig[:, 1:2]
         attn = self.conv(attn)
         return x * attn
 
 
 class BottleneckLSK(nn.Module):
-    """LSK-enhanced Bottleneck - FIXED VERSION"""
-    def __init__(self, c1, c2, shortcut=True, g=1, k=3, e=0.5):  # Added k parameter
+    """LSK-enhanced Bottleneck"""
+    def __init__(self, c1, c2, shortcut=True, g=1, k=3, e=0.5):
         super().__init__()
         c1 = int(c1)
         c2 = int(c2)
-        c_ = int(c2 * e)  # CRITICAL: Use c2 * e directly, not make_divisible
+        c_ = max(1, int(c2 * e))  # Ensure at least 1 channel
         
         self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_, c2, k, 1, g=g)  # Use k parameter for kernel size
-        self.lsk = LSK(c2)  # Apply LSK on output channels c2
+        self.cv2 = Conv(c_, c2, k, 1, g=g)
+        self.lsk = LSK(c2)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
@@ -2028,40 +2041,43 @@ class BottleneckLSK(nn.Module):
 
 class C3k2_LSK(nn.Module):
     """
-    C3k2 with LSK Attention - FIXED VERSION
+    C3k2 with LSK Attention - Compatible with YOLOv11 structure
     """
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
         super().__init__()
         c1 = int(c1)
         c2 = int(c2)
         
-        # Use same hidden channel calculation as original C3k2
-        self.c = int(c2 * e)  # hidden channels
+        # Match original C3k2 logic exactly
+        self.c = max(1, int(c2 * e))  # Ensure at least 1 channel
         
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # Corrected concatenation dimension
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
         
-        # Use c3k parameter to determine bottleneck type
+        # Build bottleneck modules based on c3k flag
         if c3k:
+            # C3k mode: kernel size 3
             self.m = nn.ModuleList(
                 BottleneckLSK(self.c, self.c, shortcut, g, k=3, e=1.0) for _ in range(n)
             )
         else:
+            # Standard mode: use the k parameter from Conv (kernel=3)
             self.m = nn.ModuleList(
-                BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)
+                BottleneckLSK(self.c, self.c, shortcut, g, k=3, e=1.0) for _ in range(n)
             )
 
     def forward(self, x):
-        """Forward pass through C3k2_LSK module."""
-        y = list(self.cv1(x).chunk(2, 1))  # Split into 2 branches
-        y.extend(m(y[-1]) for m in self.m)  # Apply bottleneck modules sequentially
+        """Forward pass matching original C3k2 structure"""
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
     def forward_split(self, x):
-        """Memory-efficient forward pass with gradient checkpointing."""
+        """Memory-efficient forward with gradient checkpointing"""
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+        
 
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
