@@ -1986,13 +1986,15 @@ class LSK(nn.Module):
     def __init__(self, dim):
         super().__init__()
         dim = int(dim)
-        if dim == 0:
-            raise ValueError(f"LSK received dim=0, which is invalid")
+        
+        # Defensive check
+        if dim <= 0:
+            raise ValueError(f"LSK: dim must be positive, got {dim}")
         
         self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
         self.conv_spatial = nn.Conv2d(dim, dim, 7, stride=1, padding=9, groups=dim, dilation=3)
         
-        dim_half = dim // 2 if dim > 1 else 1
+        dim_half = max(1, dim // 2)
         self.conv1 = nn.Conv2d(dim, dim_half, 1)
         self.conv2 = nn.Conv2d(dim, dim_half, 1)
         self.conv_squeeze = nn.Conv2d(2, 2, 7, padding=3)
@@ -2029,31 +2031,51 @@ class BottleneckLSK(nn.Module):
 
 
 class C3k2_LSK(nn.Module):
-    """
-    C3k2 with LSK attention - Exact replica of C2f structure.
-    """
+    """C3k2 with LSK attention."""
     
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
         """
-        Initialize C3k2_LSK (matching C2f signature exactly).
+        Initialize C3k2_LSK.
         
         Args:
-            c1 (int): Input channels (already width-scaled by parse_model)
-            c2 (int): Output channels (already width-scaled by parse_model)
-            n (int): Number of Bottleneck blocks
-            c3k (bool): Not used, kept for compatibility
-            e (float): Expansion ratio
-            g (int): Groups for convolution
+            c1 (int): Input channels
+            c2 (int): Output channels  
+            n (int): Number of bottlenecks
+            c3k (bool): Use C3k (not used, compatibility)
+            e (float): Channel expansion ratio
+            g (int): Convolution groups
             shortcut (bool): Use shortcut connections
         """
         super().__init__()
         
-        # MATCH C2f EXACTLY - no min/max protection
-        self.c = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        # Convert to int and validate
+        c1 = int(c1)
+        c2 = int(c2)
+        n = int(n)
+        e = float(e)
         
-        # Use LSK-enhanced bottlenecks
+        # Critical validation
+        if c1 <= 0 or c2 <= 0:
+            raise ValueError(f"C3k2_LSK: Invalid channels c1={c1}, c2={c2}")
+        if n <= 0:
+            raise ValueError(f"C3k2_LSK: Invalid n={n}, must be positive")
+        
+        # Calculate hidden channels - EXACT match to C2f
+        self.c = int(c2 * e)
+        
+        # Additional safety check
+        if self.c <= 0:
+            raise ValueError(
+                f"C3k2_LSK: Computed self.c={self.c} from c2={c2}, e={e}. "
+                f"This will cause zero-element tensor error. "
+                f"Try using a larger model variant (s/m/l instead of n)."
+            )
+        
+        # Build layers
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        
+        # Bottleneck modules with LSK
         self.m = nn.ModuleList(
             BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)
         )
@@ -2069,8 +2091,7 @@ class C3k2_LSK(nn.Module):
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
-
-
+        
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
 
