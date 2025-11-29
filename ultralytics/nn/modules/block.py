@@ -2025,34 +2025,17 @@ class BottleneckLSK(nn.Module):
 
 
 class C3k2_LSK(nn.Module):
-    """
-    C3k2 with LSK attention - Standalone implementation with safe channel handling.
-    Replicates C2f/C3k2 structure but with minimum channel protection.
-    """
-    
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
-        """
-        Initialize C3k2_LSK.
-        
-        Args:
-            c1 (int): Input channels (already scaled by parse_model)
-            c2 (int): Output channels (already scaled by parse_model)
-            n (int): Number of bottleneck blocks
-            c3k (bool): Not used, kept for compatibility
-            e (float): Channel expansion ratio
-            g (int): Groups for convolution
-            shortcut (bool): Use shortcut connections
-        """
         super().__init__()
         
-        # Calculate hidden channels with minimum protection
-        self.c = max(16, int(c2 * e))  # Ensure at least 16 channels
+        # ULTRA-SAFE: Ensure valid channel counts
+        c1 = max(16, int(c1))
+        c2 = max(16, int(c2))
+        self.c = max(8, int(c2 * e))  # Minimum 8 hidden channels
         
-        # Main convolution layers (matching C2f structure)
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # output conv
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
         
-        # Bottleneck modules with LSK attention
         self.m = nn.ModuleList(
             BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)
         )
