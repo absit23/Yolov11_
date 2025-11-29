@@ -1982,77 +1982,43 @@ class Residual(nn.Module):
 class LSK(nn.Module):
     """
     Large Selective Kernel (LSK) Attention Module.
-    LSK performs spatial feature selection using multiple branches of depth-wise
-    convolutions with large kernels and dilation.
     """
-
-    
     def __init__(self, dim):
         super().__init__()
         dim = int(dim)
-        # 5x5 Depth-wise Conv
         self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
-        # 7x7 Dilated Depth-wise Conv (Dilation=3 -> effective 13x13)
         self.conv_spatial = nn.Conv2d(dim, dim, 7, stride=1, padding=9, groups=dim, dilation=3)
-        
-        # 1x1 Projections for fusion branches
         self.conv1 = nn.Conv2d(dim, dim // 2, 1)
         self.conv2 = nn.Conv2d(dim, dim // 2, 1)
-        
-        # Squeeze branch (uses 7x7) to generate fusion weights
         self.conv_squeeze = nn.Conv2d(2, 2, 7, padding=3)
-        
-        # Final 1x1 projection to match output dimension
         self.conv = nn.Conv2d(dim // 2, dim, 1)
 
     def forward(self, x):
-        # 1. Feature Extraction (Branch 1)
         attn1_base = self.conv0(x)
-        
-        # 2. Feature Extraction (Branch 2 - Large Selective Kernel)
         attn2_base = self.conv_spatial(attn1_base)
-
-        # 3. Projection to smaller dimension for fusion
-        attn1 = self.conv1(attn1_base) # shape (B, dim/2, H, W)
-        attn2 = self.conv2(attn2_base) # shape (B, dim/2, H, W)
-        
-        # 4. Concatenate and calculate spatial aggregation
-        attn_cat = torch.cat([attn1, attn2], dim=1) # shape (B, dim, H, W)
-        
-        # 5. Spatial Attention/Squeeze Mechanism (Global Pooling is avoided, using avg/max)
-        avg_attn = torch.mean(attn_cat, dim=1, keepdim=True) # (B, 1, H, W)
-        max_attn, _ = torch.max(attn_cat, dim=1, keepdim=True) # (B, 1, H, W)
-        
-        # Aggregate avg and max, apply selective squeeze conv
-        agg = torch.cat([avg_attn, max_attn], dim=1) # (B, 2, H, W)
-        sig = self.conv_squeeze(agg).sigmoid() # (B, 2, H, W) - weights for attn1 and attn2
-
-        # 6. Apply selective weights to fusion branches
-        # sig[:, 0, :, :].unsqueeze(1) extracts the weight map for attn1
+        attn1 = self.conv1(attn1_base)
+        attn2 = self.conv2(attn2_base)
+        attn_cat = torch.cat([attn1, attn2], dim=1)
+        avg_attn = torch.mean(attn_cat, dim=1, keepdim=True)
+        max_attn, _ = torch.max(attn_cat, dim=1, keepdim=True)
+        agg = torch.cat([avg_attn, max_attn], dim=1)
+        sig = self.conv_squeeze(agg).sigmoid()
         attn = attn1 * sig[:, 0, :, :].unsqueeze(1) + attn2 * sig[:, 1, :, :].unsqueeze(1)
-        
-        # 7. Final Projection
-        attn = self.conv(attn) # (B, dim, H, W)
-        
-        # 8. Gating mechanism
+        attn = self.conv(attn)
         return x * attn
 
 
-# 2. Bottleneck Block with LSK (Replaces standard Bottleneck in C3)
 class BottleneckLSK(nn.Module):
-    """ 
-    LSK-enhanced Bottleneck used in C3k2_LSK.
-    It applies LSK attention after the main 3x3 convolution.
-    """
-    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
+    """LSK-enhanced Bottleneck - FIXED VERSION"""
+    def __init__(self, c1, c2, shortcut=True, g=1, k=3, e=0.5):  # Added k parameter
         super().__init__()
-        c1 = int(c1) # <--- CRITICAL FIX
-        c2 = int(c2) # <--- CRITICAL FIX
-        from ultralytics.utils.ops import make_divisible
-        c_ = make_divisible(c2 * e, 8)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1) # 1x1
-        self.cv2 = Conv(c_, c2, 3, 1, g=g) # 3x3
-        self.lsk = LSK(c2) # Apply LSK after 3x3 conv
+        c1 = int(c1)
+        c2 = int(c2)
+        c_ = int(c2 * e)  # CRITICAL: Use c2 * e directly, not make_divisible
+        
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c_, c2, k, 1, g=g)  # Use k parameter for kernel size
+        self.lsk = LSK(c2)  # Apply LSK on output channels c2
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
@@ -2060,32 +2026,42 @@ class BottleneckLSK(nn.Module):
         return x + h if self.add else h
 
 
-# 3. C3k2_LSK Module (The new final block)
 class C3k2_LSK(nn.Module):
     """
-    C3 Module with Large Selective Kernel (LSK) attention in its bottlenecks,
-    using the k=2 structure (two Conv layers in the shortcut branch).
+    C3k2 with LSK Attention - FIXED VERSION
     """
-
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
         super().__init__()
-        c1 = int(c1) # <--- CRITICAL FIX
-        c2 = int(c2) # <--- CRITICAL FIX
-        from ultralytics.utils.ops import make_divisible
-        c_ = make_divisible(c2 * e, 8)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1) # Main branch Conv 1
-        self.cv2 = Conv(c1, c_, 1, 1) # Shortcut branch Conv 1
-        self.cv3 = Conv(2 * c_, c2, 1, 1) # Final concatenation Conv
-        self.m = nn.Sequential(*(BottleneckLSK(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
-        self.cv4 = Conv(c_, c_, 3, 1) # Shortcut branch Conv 2
-
-    #def forward(self, x):
-        #return self.cv3(torch.cat((self.cv4(self.cv2(x)), self.m(self.cv1(x))), 1))
+        c1 = int(c1)
+        c2 = int(c2)
+        
+        # Use same hidden channel calculation as original C3k2
+        self.c = int(c2 * e)  # hidden channels
+        
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # Corrected concatenation dimension
+        
+        # Use c3k parameter to determine bottleneck type
+        if c3k:
+            self.m = nn.ModuleList(
+                BottleneckLSK(self.c, self.c, shortcut, g, k=3, e=1.0) for _ in range(n)
+            )
+        else:
+            self.m = nn.ModuleList(
+                BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)
+            )
 
     def forward(self, x):
-        branch_main = self.m(self.cv1(x))
-        branch_shortcut = self.cv4(self.cv2(x))
-        return self.cv3(torch.cat((branch_shortcut, branch_main), 1))
+        """Forward pass through C3k2_LSK module."""
+        y = list(self.cv1(x).chunk(2, 1))  # Split into 2 branches
+        y.extend(m(y[-1]) for m in self.m)  # Apply bottleneck modules sequentially
+        return self.cv2(torch.cat(y, 1))
+
+    def forward_split(self, x):
+        """Memory-efficient forward pass with gradient checkpointing."""
+        y = list(self.cv1(x).split((self.c, self.c), 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
 
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
