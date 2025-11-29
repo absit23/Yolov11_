@@ -1985,10 +1985,14 @@ class LSK(nn.Module):
     
     def __init__(self, dim):
         super().__init__()
-        dim = max(8, int(dim))
+        dim = int(dim)
+        if dim == 0:
+            raise ValueError(f"LSK received dim=0, which is invalid")
+        
         self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
         self.conv_spatial = nn.Conv2d(dim, dim, 7, stride=1, padding=9, groups=dim, dilation=3)
-        dim_half = max(1, dim // 2)
+        
+        dim_half = dim // 2 if dim > 1 else 1
         self.conv1 = nn.Conv2d(dim, dim_half, 1)
         self.conv2 = nn.Conv2d(dim, dim_half, 1)
         self.conv_squeeze = nn.Conv2d(2, 2, 7, padding=3)
@@ -2025,32 +2029,47 @@ class BottleneckLSK(nn.Module):
 
 
 class C3k2_LSK(nn.Module):
+    """
+    C3k2 with LSK attention - Exact replica of C2f structure.
+    """
+    
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
+        """
+        Initialize C3k2_LSK (matching C2f signature exactly).
+        
+        Args:
+            c1 (int): Input channels (already width-scaled by parse_model)
+            c2 (int): Output channels (already width-scaled by parse_model)
+            n (int): Number of Bottleneck blocks
+            c3k (bool): Not used, kept for compatibility
+            e (float): Expansion ratio
+            g (int): Groups for convolution
+            shortcut (bool): Use shortcut connections
+        """
         super().__init__()
         
-        # ULTRA-SAFE: Ensure valid channel counts
-        c1 = max(16, int(c1))
-        c2 = max(16, int(c2))
-        self.c = max(8, int(c2 * e))  # Minimum 8 hidden channels
-        
+        # MATCH C2f EXACTLY - no min/max protection
+        self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
         
+        # Use LSK-enhanced bottlenecks
         self.m = nn.ModuleList(
             BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)
         )
 
     def forward(self, x):
-        """Forward pass matching C2f structure."""
+        """Forward pass through C3k2_LSK layer."""
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
     def forward_split(self, x):
-        """Forward pass with split (memory efficient)."""
+        """Forward pass using split() instead of chunk()."""
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
 
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
