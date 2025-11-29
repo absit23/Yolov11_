@@ -1980,7 +1980,6 @@ class Residual(nn.Module):
 
 #new guest here:)
 
-
 class LSK(nn.Module):
     """Large Selective Kernel (LSK) Attention Module."""
     
@@ -2025,14 +2024,50 @@ class BottleneckLSK(nn.Module):
         return x + self.lsk(self.cv2(self.cv1(x))) if self.add else self.lsk(self.cv2(self.cv1(x)))
 
 
-class C3k2_LSK(C3k2):
-    """C3k2 with LSK attention in bottleneck blocks."""
+class C3k2_LSK(nn.Module):
+    """
+    C3k2 with LSK attention - Standalone implementation with safe channel handling.
+    Replicates C2f/C3k2 structure but with minimum channel protection.
+    """
     
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
-        super().__init__(c1, c2, n, c3k=False, e=e, g=g, shortcut=shortcut)
+        """
+        Initialize C3k2_LSK.
+        
+        Args:
+            c1 (int): Input channels (already scaled by parse_model)
+            c2 (int): Output channels (already scaled by parse_model)
+            n (int): Number of bottleneck blocks
+            c3k (bool): Not used, kept for compatibility
+            e (float): Channel expansion ratio
+            g (int): Groups for convolution
+            shortcut (bool): Use shortcut connections
+        """
+        super().__init__()
+        
+        # Calculate hidden channels with minimum protection
+        self.c = max(16, int(c2 * e))  # Ensure at least 16 channels
+        
+        # Main convolution layers (matching C2f structure)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # output conv
+        
+        # Bottleneck modules with LSK attention
         self.m = nn.ModuleList(
             BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)
         )
+
+    def forward(self, x):
+        """Forward pass matching C2f structure."""
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+    def forward_split(self, x):
+        """Forward pass with split (memory efficient)."""
+        y = list(self.cv1(x).split((self.c, self.c), 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
 
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
