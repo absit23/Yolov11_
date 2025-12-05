@@ -1644,7 +1644,7 @@ def parse_model(d, ch, verbose=True):
             if m in repeat_modules:
                 args.insert(2, n)  # number of repeats
                 n = 1
-            if m in {C3k2, C3k2_LSK}  # for M/L/X sizes
+            if m in {C3k2, C3k2_LSK}:  # for M/L/X sizes
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
