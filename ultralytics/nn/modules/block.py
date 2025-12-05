@@ -1980,6 +1980,11 @@ class Residual(nn.Module):
 
 #new guest here:)
 
+import torch
+import torch.nn as nn
+from ultralytics.nn.modules.conv import Conv
+
+
 class LSK(nn.Module):
     """Large Selective Kernel (LSK) Attention Module."""
     
@@ -2064,11 +2069,11 @@ class C3k2_LSK(nn.Module):
         self.c = int(c2 * e)
         
         # Additional safety check
-      if self.c <= 0:
-           raise ValueError(
-               f"C3k2_LSK: Computed self.c={self.c} from c2={c2}, e={e}. "
-               f"This will cause zero-element tensor error. "
-               f"Try using a larger model variant (s/m/l instead of n)."
+        if self.c <= 0:
+            raise ValueError(
+                f"C3k2_LSK: Computed self.c={self.c} from c2={c2}, e={e}. "
+                f"This will cause zero-element tensor error. "
+                f"Try using a larger model variant (s/m/l instead of n)."
             )
         
         # Build layers
