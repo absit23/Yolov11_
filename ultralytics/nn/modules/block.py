@@ -2061,15 +2061,15 @@ class C3k2_LSK(nn.Module):
             raise ValueError(f"C3k2_LSK: Invalid n={n}, must be positive")
         
         # Calculate hidden channels - EXACT match to C2f
-        self.c = max(1, int(c2 * e))
+        self.c = int(c2 * e)
         
         # Additional safety check
-      #  if self.c <= 0:
-           # raise ValueError(
-               # f"C3k2_LSK: Computed self.c={self.c} from c2={c2}, e={e}. "
-               # f"This will cause zero-element tensor error. "
-              #  f"Try using a larger model variant (s/m/l instead of n)."
-          #  )
+      if self.c <= 0:
+           raise ValueError(
+               f"C3k2_LSK: Computed self.c={self.c} from c2={c2}, e={e}. "
+               f"This will cause zero-element tensor error. "
+               f"Try using a larger model variant (s/m/l instead of n)."
+            )
         
         # Build layers
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
