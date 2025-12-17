@@ -1981,184 +1981,59 @@ class Residual(nn.Module):
 #new guest here:)
 
 class LSK(nn.Module):
-    """
-    Large Selective Kernel (LSK) Attention Module.
-    
-    Performs spatial feature selection using multiple branches of depth-wise
-    convolutions with large kernels and dilation for crack detection.
-    """
-    
     def __init__(self, dim):
-        """
-        Initialize LSK module.
-        
-        Args:
-            dim (int): Number of input/output channels
-        """
         super().__init__()
         dim = int(dim)
-        
-        # 5x5 Depth-wise Conv
+        # Ensure spatial preservation: p = (k - 1) // 2
         self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
-        
-        # 7x7 Dilated Depth-wise Conv (dilation=3 -> effective 13x13)
+        # For dilation=3, k=7, padding must be 9 to keep size: (7-1)*3 // 2 = 9
         self.conv_spatial = nn.Conv2d(dim, dim, 7, stride=1, padding=9, groups=dim, dilation=3)
         
-        # Channel reduction for efficient processing
         dim_half = max(1, dim // 2)
         self.conv1 = nn.Conv2d(dim, dim_half, 1)
         self.conv2 = nn.Conv2d(dim, dim_half, 1)
-        
-        # Spatial attention mechanism
         self.conv_squeeze = nn.Conv2d(2, 2, 7, padding=3)
-        
-        # Final projection
         self.conv = nn.Conv2d(dim_half, dim, 1)
 
     def forward(self, x):
-        """
-        Forward pass through LSK attention.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W)
-            
-        Returns:
-            torch.Tensor: Attention-weighted output of shape (B, C, H, W)
-        """
-        # Branch 1: 5x5 depth-wise conv
         attn1_base = self.conv0(x)
-        
-        # Branch 2: Large selective kernel (7x7 dilated)
         attn2_base = self.conv_spatial(attn1_base)
-        
-        # Project both branches
         attn1 = self.conv1(attn1_base)
         attn2 = self.conv2(attn2_base)
-        
-        # Concatenate features
         attn_cat = torch.cat([attn1, attn2], dim=1)
-        
-        # Spatial attention pooling
         avg_attn = torch.mean(attn_cat, dim=1, keepdim=True)
         max_attn, _ = torch.max(attn_cat, dim=1, keepdim=True)
-        
-        # Generate attention weights
         agg = torch.cat([avg_attn, max_attn], dim=1)
         sig = self.conv_squeeze(agg).sigmoid()
-        
-        # Apply selective attention
         attn = attn1 * sig[:, 0:1] + attn2 * sig[:, 1:2]
-        attn = self.conv(attn)
-        
-        # Gating mechanism
-        return x * attn
-
+        return x * self.conv(attn)
 
 class BottleneckLSK(nn.Module):
-    """
-    Standard Bottleneck block with LSK attention.
-    
-    Enhances feature extraction with Large Selective Kernel attention mechanism,
-    particularly effective for detecting irregular crack patterns.
-    """
-    
     def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
-        """
-        Initialize BottleneckLSK.
-        
-        Args:
-            c1 (int): Input channels
-            c2 (int): Output channels
-            shortcut (bool): Use residual connection
-            g (int): Groups for convolution
-            k (tuple): Kernel sizes for cv1 and cv2
-            e (float): Channel expansion ratio
-        """
         super().__init__()
-        c_ = int(c2 * e)  # Hidden channels
-        
+        c_ = max(1, int(c2 * e))
         self.cv1 = Conv(c1, c_, k[0], 1)
         self.cv2 = Conv(c_, c2, k[1], 1, g=g)
-        self.lsk = LSK(c2)  # Apply LSK attention on output
+        self.lsk = LSK(c2)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
-        """
-        Forward pass through bottleneck with LSK attention.
-        
-        Args:
-            x (torch.Tensor): Input tensor
-            
-        Returns:
-            torch.Tensor: Output tensor with optional residual connection
-        """
         return x + self.lsk(self.cv2(self.cv1(x))) if self.add else self.lsk(self.cv2(self.cv1(x)))
 
-
 class C3k2_LSK(nn.Module):
-    """
-    C3k2 module with LSK attention for crack segmentation.
-    
-    Faster implementation of CSP Bottleneck with 2 convolutions and LSK attention.
-    Designed for detecting cracks with varying shapes, widths, and orientations.
-    """
-    
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
-        """
-        Initialize C3k2_LSK.
-        
-        Args:
-            c1 (int): Input channels
-            c2 (int): Output channels  
-            n (int): Number of bottleneck blocks
-            c3k (bool): Use C3k mode (not used, kept for compatibility)
-            e (float): Channel expansion ratio
-            g (int): Groups for convolution
-            shortcut (bool): Use shortcut connections in bottlenecks
-        """
         super().__init__()
-        
-        # Calculate hidden channels (matches C2f behavior)
-        self.c = int(c2 * e)
-        
-        # Input projection: splits into 2 branches
+        # Standard hidden channel calculation
+        self.c = max(1, int(c2 * e)) 
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        
-        # Output projection: combines all branches
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
-        
-        # Bottleneck sequence with LSK attention
-        self.m = nn.ModuleList(
-            BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)
-        )
+        self.m = nn.ModuleList(BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
 
     def forward(self, x):
-        """
-        Forward pass through C3k2_LSK layer.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, c1, H, W)
-            
-        Returns:
-            torch.Tensor: Output tensor of shape (B, c2, H, W)
-        """
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
-
-    def forward_split(self, x):
-        """
-        Memory-efficient forward pass using split() instead of chunk().
         
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, c1, H, W)
-            
-        Returns:
-            torch.Tensor: Output tensor of shape (B, c2, H, W)
-        """
-        y = list(self.cv1(x).split((self.c, self.c), 1))
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
         
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
