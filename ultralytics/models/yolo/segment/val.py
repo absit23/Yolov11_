@@ -171,7 +171,7 @@ class SegmentationValidator(DetectionValidator):
     
 
     # Box-level matching (original Ultralytics behavior)
-        def _process_batch(
+    def _process_batch(
         self,
         preds: dict[str, torch.Tensor],
         batch: dict[str, Any]
@@ -204,6 +204,7 @@ class SegmentationValidator(DetectionValidator):
 
         tp.update({"tp_m": tp_m})
         return tp
+
 
 
     def plot_predictions(self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int) -> None:
