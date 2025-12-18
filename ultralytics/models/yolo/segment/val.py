@@ -189,9 +189,11 @@ class SegmentationValidator(DetectionValidator):
                     batch["masks"].unsqueeze(1).float(),
                     size=preds["masks"].shape[-2:],
                     mode="nearest"
-                ).squeeze(1).bool()
+                ).squeeze(1)
             else:
-                gt_masks = batch["masks"]
+                gt_masks = batch["masks"].float()
+                
+            pred_masks = preds["masks"].float()
 
             iou = mask_iou(
                 gt_masks.flatten(1),
