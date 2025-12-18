@@ -148,7 +148,7 @@ class SegmentationValidator(DetectionValidator):
         prepared_batch["masks"] = masks
         return prepared_batch
 
-     def _process_batch( self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, np.ndarray]:
+     #def _process_batch( self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, np.ndarray]:
         """
         Compute correct prediction matrix for a batch based on bounding boxes and optional masks.
 
@@ -171,40 +171,39 @@ class SegmentationValidator(DetectionValidator):
     
 
     # Box-level matching (original Ultralytics behavior)
-    tp = super()._process_batch(preds, batch)
-    gt_cls = batch["cls"]
+        def _process_batch(
+        self,
+        preds: dict[str, torch.Tensor],
+        batch: dict[str, Any]
+    ) -> dict[str, np.ndarray]:
 
-    # No GT or no predictions
-    if gt_cls.shape[0] == 0 or preds["cls"].shape[0] == 0:
-        tp_m = np.zeros((preds["cls"].shape[0], self.niou), dtype=bool)
+        tp = super()._process_batch(preds, batch)
+        gt_cls = batch["cls"]
 
-    else:
-        # DEBUG (remove later)
-        # print(batch["masks"].shape, preds["masks"].shape)
-
-        # 🔴 FIX: resize GT masks to predicted mask resolution
-        if batch["masks"].shape[-2:] != preds["masks"].shape[-2:]:
-            gt_masks = F.interpolate(
-                batch["masks"].unsqueeze(1).float(),   # [N,1,H,W]
-                size=preds["masks"].shape[-2:],        # match pred masks
-                mode="nearest"
-            ).squeeze(1).bool()
+        if gt_cls.shape[0] == 0 or preds["cls"].shape[0] == 0:
+            tp_m = np.zeros((preds["cls"].shape[0], self.niou), dtype=bool)
         else:
-            gt_masks = batch["masks"]
+            # Resize GT masks to predicted mask resolution if needed
+            if batch["masks"].shape[-2:] != preds["masks"].shape[-2:]:
+                gt_masks = F.interpolate(
+                    batch["masks"].unsqueeze(1).float(),
+                    size=preds["masks"].shape[-2:],
+                    mode="nearest"
+                ).squeeze(1).bool()
+            else:
+                gt_masks = batch["masks"]
 
-        # Mask IoU
-        iou = mask_iou(
-            gt_masks.flatten(1),
-            preds["masks"].flatten(1)
-        )
+            iou = mask_iou(
+                gt_masks.flatten(1),
+                preds["masks"].flatten(1)
+            )
 
-        tp_m = self.match_predictions(
-            preds["cls"], gt_cls, iou
-        ).cpu().numpy()
+            tp_m = self.match_predictions(
+                preds["cls"], gt_cls, iou
+            ).cpu().numpy()
 
-    # Update mask TP matrix
-    tp.update({"tp_m": tp_m})
-    return tp
+        tp.update({"tp_m": tp_m})
+        return tp
 
 
     def plot_predictions(self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int) -> None:
