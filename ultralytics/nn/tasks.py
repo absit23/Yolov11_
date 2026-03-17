@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from  ultralytics.nn.modules import DySample
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
     AIFI,
@@ -39,10 +40,6 @@ from ultralytics.nn.modules import (
     CBLinear,
     Classify,
     Concat,
-    ASFF,
-    C3k2_LSK,
-    BottleneckLSK,
-    LSK,
     Conv,
     Conv2,
     ConvTranspose,
@@ -70,6 +67,18 @@ from ultralytics.nn.modules import (
     WorldDetect,
     YOLOEDetect,
     YOLOESegment,
+    C3k2_Ghost,
+    C3k_Ghost,
+    LSK,
+    SCBR, 
+    C3k2_ScConv,
+    C3k2_PConv,
+    FasterBottleneck,
+    PConv,
+    DySample,
+    CrackADown,
+    CrackBottleneck,
+    C3k2_Crack,
     v10Detect,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
@@ -745,6 +754,22 @@ class RTDETRDetectionModel(DetectionModel):
             verbose (bool): Print additional information during initialization.
         """
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+
+    def _apply(self, fn):
+        """
+        Apply a function to all tensors in the model that are not parameters or registered buffers.
+
+        Args:
+            fn (function): The function to apply to the model.
+
+        Returns:
+            (RTDETRDetectionModel): An updated BaseModel object.
+        """
+        self = super()._apply(fn)
+        m = self.model[-1]
+        m.anchors = fn(m.anchors)
+        m.valid_mask = fn(m.valid_mask)
+        return self
 
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
@@ -1580,7 +1605,6 @@ def parse_model(d, ch, verbose=True):
             C2,
             C2f,
             C3k2,
-            C3k2_LSK,
             RepNCSPELAN4,
             ELAN1,
             ADown,
@@ -1598,6 +1622,17 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
+            C3k2_Ghost,
+            C3k_Ghost,
+            SCBR,
+            C3k2_ScConv,
+            C3k2_PConv,
+            FasterBottleneck,
+            PConv,
+            DySample,
+            CrackADown,
+            CrackBottleneck,
+            C3k2_Crack,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1607,7 +1642,6 @@ def parse_model(d, ch, verbose=True):
             C2,
             C2f,
             C3k2,
-            C3k2_LSK,
             C2fAttn,
             C3,
             C3TR,
@@ -1617,7 +1651,15 @@ def parse_model(d, ch, verbose=True):
             C2fPSA,
             C2fCIB,
             C2PSA,
+            C3k2_Ghost,
             A2C2f,
+            SCBR,
+            C3k2_ScConv,
+            C3k2_PConv,
+            CrackBottleneck,
+            C3k2_Crack,
+            FasterBottleneck,
+            PConv,
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -1646,11 +1688,13 @@ def parse_model(d, ch, verbose=True):
                 args.insert(2, n)  # number of repeats
                 n = 1
                 
-            if m in {C3k2, C3k2_LSK}:  # for M/L/X sizes
+            if m in {C3k2}:  # for M/L/X sizes
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
+
             
+                    
             if m is A2C2f:
                 legacy = False
                 if scale in "lx":  # for L/X sizes
@@ -1671,21 +1715,6 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m is ASFF:
-            # 1. Get the list of input channel counts from the layers 'f'
-            in_channels_list = [ch[x] for x in f]
-            
-            # 2. Extract YAML-provided arguments: [level, out_channels, rfb (optional), vis (optional)]
-            level = args[0]      # The first arg in YAML is 'level' (0, 1, or 2)
-            out_channels = args[1] # The second arg in YAML is 'out_channels'
-            
-            # 3. The output channel (c2) is the designated out_channels
-            c2 = out_channels
-            
-            # 4. Reconstruct the module arguments (args) in the correct order for ASFF.__init__
-            #    New structure: [level, in_channels_list, out_channels, rfb, vis]
-            #    We use *args[2:] to grab the optional rfb and vis flags
-            args = [level, in_channels_list, out_channels, *args[2:]]
         elif m in frozenset(
             {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
         ):
