@@ -4,17 +4,6 @@ Ultralytics neural network modules.
 
 This module provides access to various neural network components used in Ultralytics models, including convolution
 blocks, attention mechanisms, transformer components, and detection/segmentation heads.
-
-Examples:
-    Visualize a module with Netron
-    >>> from ultralytics.nn.modules import Conv
-    >>> import torch
-    >>> import subprocess
-    >>> x = torch.ones(1, 128, 40, 40)
-    >>> m = Conv(128, 128)
-    >>> f = f"{m._get_name()}.onnx"
-    >>> torch.onnx.export(m, x, f)
-    >>> subprocess.run(f"onnxslim {f} {f} && open {f}", shell=True, check=True)  # pip install onnxslim
 """
 
 from .block import (
@@ -58,9 +47,18 @@ from .block import (
     RepVGGDW,
     ResNetLayer,
     SCDown,
-    LSK,
-    BottleneckLSK,
-    C3k2_LSK,
+    C3k2_Ghost,             # <--- Custom
+    C3k_Ghost,              # <--- Custom
+    LSK,                    # <--- Custom
+    SCBR, # <--- Custom (The new one)
+    C3k2_PConv,
+    FasterBottleneck,
+    PConv,
+    C3k2_ScConv,
+    DySample,
+    CrackADown,
+    CrackBottleneck,
+    C3k2_Crack,
     TorchVision,
 )
 from .conv import (
@@ -77,7 +75,6 @@ from .conv import (
     Index,
     LightConv,
     RepConv,
-    ASFF, 
     SpatialAttention,
 )
 from .head import (
@@ -181,10 +178,18 @@ __all__ = (
     "Attention",
     "PSA",
     "TorchVision",
-    "ASFF",
     "Index",
     "A2C2f",
-    "LSK",
-    "BottleneckLSK",
-    "C3k2_LSK",
+    "C3k2_Ghost",            # <--- Exported
+    "C3k_Ghost",             # <--- Exported
+    "LSK",                   # <--- Exported
+    "SCBR",# <--- Exported
+    "C3k2_PConv",
+    "FasterBottleneck",
+    "PConv",
+    "C3k2_ScConv",
+    "DySample,",
+    "CrackADown",
+    "CrackBottleneck",
+    "C3k2_Crack",
 )
