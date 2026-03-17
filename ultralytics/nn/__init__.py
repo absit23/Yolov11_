@@ -12,7 +12,7 @@ from .tasks import (
     torch_safe_load,
     yaml_model_load,
 )
-
+from .modules.block import SCBR
 __all__ = (
     "load_checkpoint",
     "parse_model",
@@ -24,4 +24,5 @@ __all__ = (
     "SegmentationModel",
     "ClassificationModel",
     "BaseModel",
+    "SCBR",
 )
