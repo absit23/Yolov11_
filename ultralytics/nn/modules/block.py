@@ -6,8 +6,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ultralytics.nn.modules.conv import Conv
+
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
+
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
 
@@ -50,9 +51,26 @@ __all__ = (
     "Attention",
     "PSA",
     "SCDown",
+    "C3k2_Ghost",
+    "C3k_Ghost",
     "LSK",
-    "BottleneckLSK",
-    "C3k2_LSK",
+    "TripletAttention",
+    "StripLSK",
+    "Bottleneck_Split",
+    "SCBR",
+    "GroupNorm2d",
+    "SRU",
+    "CRU",
+    "ScConv",
+    "BottleneckScConv",
+    "C3k2_ScConv",
+    "DySample",
+    "C3k2_PConv",
+    "CrackADown",
+    "FasterBottleneck",
+    "PConv",
+    "CrackBottleneck",
+    "C3k2_Crack",
     "TorchVision",
 )
 
@@ -90,28 +108,22 @@ class Proto(nn.Module):
     def __init__(self, c1: int, c_: int = 256, c2: int = 32):
         """
         Initialize the Ultralytics YOLO models mask Proto module with specified number of protos and masks.
+
+        Args:
+            c1 (int): Input channels.
+            c_ (int): Intermediate channels.
+            c2 (int): Output channels (number of protos).
         """
         super().__init__()
         self.cv1 = Conv(c1, c_, k=3)
-        
-        # --- FIX: Two sequential upsampling layers for 4x total upsampling (2x * 2x) ---
-        # 1. First 2x upsample
-        self.upsample1 = nn.ConvTranspose2d(c_, c_, kernel_size=2, stride=2, padding=0, bias=True) 
-        # 2. Second 2x upsample (New layer)
-        self.upsample2 = nn.ConvTranspose2d(c_, c_, kernel_size=2, stride=2, padding=0, bias=True)
-        # --- END FIX ---
-        
+        self.upsample = nn.ConvTranspose2d(c_, c_, 2, 2, 0, bias=True)  # nn.Upsample(scale_factor=2, mode='nearest')
         self.cv2 = Conv(c_, c_, k=3)
         self.cv3 = Conv(c_, c2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform a forward pass through layers using an upsampled input image."""
-        x = self.cv1(x)
-        # Apply the sequential 4x upsampling
-        x = self.upsample1(x)
-        x = self.upsample2(x)
-        
-        return self.cv3(self.cv2(x))
+        return self.cv3(self.cv2(self.upsample(self.cv1(x))))
+
 
 class HGStem(nn.Module):
     """
@@ -1977,66 +1989,591 @@ class Residual(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply residual connection to input features."""
         return x + self.m(x)
+#another new guest here :{
 
-#new guest here:)
+class C3k2_Ghost(C2f):
+    """
+    C3k2_Ghost is a lightweight version of YOLOv11's C3k2.
+    It replaces standard Bottleneck blocks with GhostBottleneck blocks to 
+    reduce parameters and computational load, as seen in YOLO-Air and YOLO11-ATL papers.
+    """
 
+    def __init__(self, c1: int, c2: int, n: int = 1, c3k: bool = False, e: float = 0.5, g: int = 1, shortcut: bool = True):
+        """
+        Initialize C3k2_Ghost module.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            n (int): Number of blocks.
+            c3k (bool): Whether to use C3k-style logic (customizable kernels).
+            e (float): Expansion ratio.
+            g (int): Groups for convolutions.
+            shortcut (bool): Whether to use shortcut connections.
+        """
+        super().__init__(c1, c2, n, shortcut, g, e)
+        # We replace the internal 'self.m' ModuleList with GhostBottlenecks
+        # c is inherited from C2f (self.c = int(c2 * e))
+        self.m = nn.ModuleList(
+            C3k_Ghost(self.c, self.c, 2, shortcut, g) if c3k else GhostBottleneck(self.c, self.c) 
+            for _ in range(n)
+        )
+
+class C3k_Ghost(C3):
+    """
+    C3k_Ghost is a CSP bottleneck module using GhostBottleneck blocks.
+    It provides a more efficient alternative for feature extraction.
+    """
+
+    def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = True, g: int = 1, e: float = 0.5, k: int = 3):
+        """
+        Initialize C3k_Ghost module.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            n (int): Number of GhostBottleneck blocks.
+            shortcut (bool): Whether to use shortcut connections.
+            g (int): Groups for convolutions.
+            e (float): Expansion ratio.
+            k (int): Kernel size.
+        """
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  # hidden channels
+        # Using the GhostBottleneck instead of standard Bottleneck
+        self.m = nn.Sequential(*(GhostBottleneck(c_, c_, k=k) for _ in range(n)))
+
+
+#new guest here);
+# ==================== LSK Attention ====================
 class LSK(nn.Module):
-    def __init__(self, dim):
+    """Large Selective Kernel Attention."""
+    def __init__(self, dim, dilation=3):
         super().__init__()
-        dim = int(dim)
-        # Ensure spatial preservation: p = (k - 1) // 2
-        self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
-        # For dilation=3, k=7, padding must be 9 to keep size: (7-1)*3 // 2 = 9
-        self.conv_spatial = nn.Conv2d(dim, dim, 7, stride=1, padding=3, groups=dim, dilation=1)
+        self.dw5 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
+        if dilation == 1:
+            self.dw7 = nn.Conv2d(dim, dim, 7, padding=3, groups=dim, dilation=1)
+        elif dilation == 2:
+            self.dw7 = nn.Conv2d(dim, dim, 7, padding=6, groups=dim, dilation=2)
+        else:
+            self.dw7 = nn.Conv2d(dim, dim, 7, padding=9, groups=dim, dilation=3)
 
-        
         dim_half = max(1, dim // 2)
-        self.conv1 = nn.Conv2d(dim, dim_half, 1)
-        self.conv2 = nn.Conv2d(dim, dim_half, 1)
+        self.pw1 = nn.Conv2d(dim, dim_half, 1)
+        self.pw2 = nn.Conv2d(dim, dim_half, 1)
         self.conv_squeeze = nn.Conv2d(2, 2, 7, padding=3)
-        self.conv = nn.Conv2d(dim_half, dim, 1)
+        self.conv_out = nn.Conv2d(dim_half, dim, 1)
 
     def forward(self, x):
-        attn1_base = self.conv0(x)
-        attn2_base = self.conv_spatial(attn1_base)
-        attn1 = self.conv1(attn1_base)
-        attn2 = self.conv2(attn2_base)
-        attn_cat = torch.cat([attn1, attn2], dim=1)
-        avg_attn = torch.mean(attn_cat, dim=1, keepdim=True)
-        max_attn, _ = torch.max(attn_cat, dim=1, keepdim=True)
-        agg = torch.cat([avg_attn, max_attn], dim=1)
-        sig = self.conv_squeeze(agg).sigmoid()
-        attn = attn1 * sig[:, 0:1] + attn2 * sig[:, 1:2]
-        return x * self.conv(attn)
+        u1 = self.dw5(x)
+        u2 = self.dw7(u1)
+        a1, a2 = self.pw1(u1), self.pw2(u2)
+        attn = torch.cat([a1, a2], dim=1)
+        avg = torch.mean(attn, dim=1, keepdim=True)
+        mx, _ = torch.max(attn, dim=1, keepdim=True)
+        sig = self.conv_squeeze(torch.cat([avg, mx], dim=1)).sigmoid()
+        fused = a1 * sig[:, 0:1] + a2 * sig[:, 1:2]
+        return x * self.conv_out(fused)
+# ---------------------------------------------------------
+# 1. Lightweight Triplet Attention (Verified < 3k params)
+# ---------------------------------------------------------
+class TripletAttention(nn.Module):
+    """
+    Lightweight Triplet Attention.
+    Computes cross-dimension interaction (C-H, C-W, H-W) using 7x7 spatial convs.
+    """
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        self.spatial_conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
 
-class BottleneckLSK(nn.Module):
+    def forward(self, x):
+        # Branch 1: Channel-Height (H-C interaction)
+        x_perm1 = x.permute(0, 2, 1, 3).contiguous()
+        attn1 = self._spatial_attn(x_perm1)
+        b1 = (x_perm1 * attn1).permute(0, 2, 1, 3)
+
+        # Branch 2: Channel-Width (W-C interaction)
+        x_perm2 = x.permute(0, 3, 2, 1).contiguous()
+        attn2 = self._spatial_attn(x_perm2)
+        b2 = (x_perm2 * attn2).permute(0, 3, 2, 1)
+
+        # Branch 3: Spatial (H-W interaction)
+        attn3 = self._spatial_attn(x)
+        b3 = x * attn3
+
+        return (b1 + b2 + b3) / 3
+
+    def _spatial_attn(self, x):
+        # Compresses channel dim to 2 (Mean + Max) -> Conv -> Sigmoid
+        mean_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        return self.sigmoid(self.spatial_conv(torch.cat([mean_out, max_out], dim=1)))
+
+
+# ---------------------------------------------------------
+# 2. Strip-LSK (Optimized for Linear Structures)
+# ---------------------------------------------------------
+class StripLSK(nn.Module):
+    """
+    Optimized LSK for Cracks.
+    Decomposes large kernels into Strips (1xK, Kx1).
+    k=7 is the 'Golden Number' for thin crack detection.
+    """
+    def __init__(self, dim, k=7): # FIXED: Default to 7
+        super().__init__()
+        # Depthwise Horizontal Strip
+        self.conv_h = nn.Conv2d(dim, dim, (1, k), padding=(0, k//2), groups=dim, bias=False)
+        # Depthwise Vertical Strip
+        self.conv_v = nn.Conv2d(dim, dim, (k, 1), padding=(k//2, 0), groups=dim, bias=False)
+        # Spatial Aggregation (Mixing) - Keep at 5
+        self.conv_s = nn.Conv2d(dim, dim, 5, padding=2, groups=dim, bias=False)
+        # Channel Mixing (1x1)
+        self.conv_1x1 = nn.Conv2d(dim, dim, 1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        attn = self.conv_h(x)
+        attn = self.conv_v(attn)
+        attn = self.conv_s(attn)
+        attn = self.conv_1x1(attn)
+        return x * self.sigmoid(attn)
+
+
+# ---------------------------------------------------------
+# 3. SCBR Bottleneck (The Split Logic)
+# ---------------------------------------------------------
+class Bottleneck_Split(nn.Module):
+    """
+    Splits the bottleneck channels:
+    - 75% go to StripLSK (Context/Structure for thin/thick cracks)
+    - 25% go to Triplet (Detail/Refinement)
+    """
     def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
         super().__init__()
-        c_ = max(1, int(c2 * e))
+        c_ = int(c2 * e)  # Hidden channels
         self.cv1 = Conv(c1, c_, k[0], 1)
         self.cv2 = Conv(c_, c2, k[1], 1, g=g)
-        self.lsk = LSK(c2)
+        self.add = shortcut and c1 == c2
+        
+        # 🔥 THE FIX: 75% Split for LSK to prioritize crack continuity
+        self.split_c = int(c_ * 0.75) 
+
+        # Branch 1: LSK for Structure 
+        self.branch_lsk = StripLSK(self.split_c, k=7)
+        
+        # Branch 2: Triplet for Refinement
+        self.branch_triplet = TripletAttention()
+
+    def forward(self, x):
+        # 1. Initial expansion
+        y = self.cv1(x)
+        
+        # 2. Split Logic (Dynamically calculates remaining channels for Triplet)
+        y_lsk, y_triplet = torch.split(y, [self.split_c, y.shape[1] - self.split_c], dim=1)
+        
+        # 3. Parallel Processing
+        out_lsk = self.branch_lsk(y_lsk)
+        out_triplet = self.branch_triplet(y_triplet)
+        
+        # 4. Concatenate & Final Projection
+        y_fused = torch.cat([out_lsk, out_triplet], dim=1)
+        y_out = self.cv2(y_fused)
+        
+        return x + y_out if self.add else y_out
+
+
+# ---------------------------------------------------------
+# 4. SCBR Module (The Wrapper)
+# ---------------------------------------------------------
+class SCBR(C2f):
+    """
+    Structure-Context Bottleneck Refinement (SCBR)
+    Replaces standard C2f/C3k2 with Split-Attention bottlenecks.
+    """
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            Bottleneck_Split(self.c, self.c, shortcut, g, k=(3, 3), e=1.0)
+            for _ in range(n)
+        )
+#===============================DySample==========================================
+
+def normal_init(module, mean=0, std=1, bias=0):
+    if hasattr(module, 'weight') and module.weight is not None:
+        nn.init.normal_(module.weight, mean, std)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
+
+def constant_init(module, val, bias=0):
+    if hasattr(module, 'weight') and module.weight is not None:
+        nn.init.constant_(module.weight, val)
+    if hasattr(module, 'bias') and module.bias is not None:
+        nn.init.constant_(module.bias, bias)
+
+class DySample(nn.Module):
+    def __init__(self, c1, c2=None, scale=2, style='lp', groups=4, dyscope=False):
+        super().__init__()
+        
+        # --- YOLO COMPATIBILITY BLOCK ---
+        # YOLO passes (c1, c2, *args). We force scale=2 for upsampling layers.
+        self.scale = 2
+        self.style = 'lp'
+        self.groups = 4
+        # -------------------------------
+
+        # Input: c1. Output Offset: 2 * groups * scale^2
+        out_channels = 2 * self.groups * self.scale ** 2
+        self.offset = nn.Conv2d(c1, out_channels, 1)
+        
+        normal_init(self.offset, std=0.001)
+        
+        if dyscope:
+            self.scope = nn.Conv2d(c1, out_channels, 1, bias=False)
+            constant_init(self.scope, val=0.)
+
+        self.register_buffer('init_pos', self._init_pos())
+
+    def _init_pos(self):
+        h = torch.arange((-self.scale + 1) / 2, (self.scale - 1) / 2 + 1) / self.scale
+        return torch.stack(torch.meshgrid([h, h], indexing='ij')).transpose(1, 2).repeat(1, self.groups, 1).reshape(1, -1, 1, 1)
+
+    def sample(self, x, offset):
+        B, _, H, W = offset.shape
+        offset = offset.view(B, 2, -1, H, W)
+        
+        coords_h = torch.arange(H, device=x.device) + 0.5
+        coords_w = torch.arange(W, device=x.device) + 0.5
+        coords = torch.stack(torch.meshgrid([coords_w, coords_h], indexing='ij')
+                             ).transpose(1, 2).unsqueeze(1).unsqueeze(0).type(x.dtype).to(x.device)
+        
+        normalizer = torch.tensor([W, H], dtype=x.dtype, device=x.device).view(1, 2, 1, 1, 1)
+        coords = 2 * (coords + offset) / normalizer - 1
+        
+        # === THE BUG FIX IS HERE ===
+        # Changed .view() to .reshape() to handle non-contiguous tensors
+        # This prevents the RuntimeError: Sizes of tensors must match...
+        coords = F.pixel_shuffle(coords.reshape(B, -1, H, W), self.scale).view(
+            B, 2, -1, self.scale * H, self.scale * W).permute(0, 2, 3, 4, 1).contiguous().flatten(0, 1)
+        
+        return F.grid_sample(x.reshape(B * self.groups, -1, H, W), coords, mode='bilinear',
+                             align_corners=False, padding_mode="border").view(B, -1, self.scale * H, self.scale * W)
+
+    def forward(self, x):
+        offset = self.offset(x) * 0.25 + self.init_pos
+        return self.sample(x, offset)
+#===============================DySample==========================================
+
+#=================================================================================
+#==========================ScConv=================================================
+
+
+class SRU(nn.Module):
+    """
+    Spatial Reconstruction Unit (Optimized)
+    """
+    def __init__(self, n_channels: int, n_groups: int = 16, gate_threshold: float = 0.5):
+        super().__init__()
+        # Safe GroupNorm: ensures num_groups <= n_channels
+        groups = min(n_groups, n_channels)
+        self.gn = nn.GroupNorm(num_groups=groups, num_channels=n_channels)
+        self.gate_threshold = gate_threshold
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        gn_x = self.gn(x)
+        
+        # Safe gamma extraction
+        w_gamma = self.gn.weight / (sum(self.gn.weight) + 1e-5)
+        w_gamma = w_gamma.view(1, -1, 1, 1)
+        reweights = self.sigmoid(gn_x * w_gamma)
+        
+        # Gate-based separation
+        info_mask = reweights >= self.gate_threshold
+        noninfo_mask = reweights < self.gate_threshold
+        
+        # FP16-safe type conversion (Crucial for YOLO AMP training)
+        x_1 = info_mask.type_as(x) * x
+        x_2 = noninfo_mask.type_as(x) * x
+        
+        return self.reconstruct(x_1, x_2)
+
+    def reconstruct(self, x_1, x_2):
+        x_11, x_12 = torch.split(x_1, x_1.size(1) // 2, dim=1)
+        x_21, x_22 = torch.split(x_2, x_2.size(1) // 2, dim=1)
+        return torch.cat([x_11 + x_22, x_12 + x_21], dim=1)
+
+
+class CRU(nn.Module):
+    """
+    Channel Reconstruction Unit (Enhanced with Activations)
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, alpha: float = 0.5, squeeze_ratio: int = 2):
+        super().__init__()
+        
+        self.up_channel = int(alpha * in_channels)
+        self.low_channel = in_channels - self.up_channel
+        
+        # Squeeze with Activation (Non-linearity helps learning)
+        self.squeeze1 = nn.Sequential(
+            nn.Conv2d(self.up_channel, self.up_channel // squeeze_ratio, 1, bias=False),
+            nn.BatchNorm2d(self.up_channel // squeeze_ratio),
+            nn.SiLU(inplace=True)
+        )
+        self.squeeze2 = nn.Sequential(
+            nn.Conv2d(self.low_channel, self.low_channel // squeeze_ratio, 1, bias=False),
+            nn.BatchNorm2d(self.low_channel // squeeze_ratio),
+            nn.SiLU(inplace=True)
+        )
+
+        # Adaptive Groups calculation
+        # Ensures groups >= 1 and groups <= channels
+        up_squeeze_ch = self.up_channel // squeeze_ratio
+        groups = min(max(1, up_squeeze_ch // 4), 32)
+        
+        # Upper Branch: Group Conv
+        self.GWC = nn.Conv2d(
+            up_squeeze_ch, 
+            out_channels, 
+            kernel_size=kernel_size, 
+            stride=1, 
+            padding=kernel_size // 2, 
+            groups=groups
+        )
+        self.PWC1 = nn.Conv2d(up_squeeze_ch, out_channels, 1, bias=False)
+
+        # Lower Branch: Pointwise
+        low_squeeze_ch = self.low_channel // squeeze_ratio
+        self.PWC2 = nn.Conv2d(low_squeeze_ch, out_channels - low_squeeze_ch, 1, bias=False)
+        
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):
+        # Split and Squeeze
+        up, low = torch.split(x, [self.up_channel, self.low_channel], dim=1)
+        up = self.squeeze1(up)
+        low = self.squeeze2(low)
+
+        # Transform Upper
+        y1 = self.GWC(up) + self.PWC1(up)
+        
+        # Transform Lower
+        y2 = torch.cat([self.PWC2(low), low], dim=1)
+
+        # Fusion
+        out = torch.cat([y1, y2], dim=1)
+        attn = self.pool(out)
+        attn = F.softmax(attn, dim=1)
+        
+        beta1, beta2 = torch.split(attn, attn.size(1) // 2, dim=1)
+        
+        return beta1 * y1 + beta2 * y2
+
+
+class ScConv(nn.Module):
+    """
+    ScConv Main Module
+    """
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, stride: int = 1, padding: int = 1, n_groups: int = 16, gate_threshold: float = 0.5, alpha: float = 0.5, squeeze_ratio: int = 2):
+        super().__init__()
+        
+        self.SRU = SRU(n_channels=in_channels, n_groups=n_groups, gate_threshold=gate_threshold)
+        self.CRU = CRU(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, alpha=alpha, squeeze_ratio=squeeze_ratio)
+
+    def forward(self, x):
+        x = self.SRU(x)
+        x = self.CRU(x)
+        return x
+
+
+class BottleneckScConv(nn.Module):
+    """
+    Bottleneck with ScConv replacing second convolution.
+    """
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)  # Hidden channels
+        
+        # 1. Expand / Project (Standard)
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        
+        # 2. ScConv (The heavy lifter)
+        # Note: ScConv internally handles c_ -> c2 via CRU
+        self.scconv = ScConv(c_, c2, kernel_size=k[1])
+        
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
-        return x + self.lsk(self.cv2(self.cv1(x))) if self.add else self.lsk(self.cv2(self.cv1(x)))
+        y = self.scconv(self.cv1(x))
+        return x + y if self.add else y
 
-class C3k2_LSK(nn.Module):
+
+class C3k2_ScConv(C2f):
+    """
+    C3k2 with ScConv bottlenecks
+    """
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            BottleneckScConv(self.c, self.c, shortcut, g, k=(3, 3), e=1.0)
+            for _ in range(n)
+        )
+        
+
+        #New >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+class PConv(nn.Module):
+    """
+    Partial Convolution - FasterNet style
+    Only convolves first n_div fraction of channels
+    """
+    def __init__(self, in_channels, n_div=2, kernel_size=3):
         super().__init__()
-        # Standard hidden channel calculation
-        self.c = max(1, int(c2 * e)) 
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)
-        self.m = nn.ModuleList(BottleneckLSK(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
+        self.dim_conv = in_channels // n_div        # channels to convolve
+        self.dim_untouched = in_channels - self.dim_conv  # channels to skip
+        
+        self.conv = nn.Conv2d(
+            self.dim_conv,
+            self.dim_conv,
+            kernel_size,
+            padding=kernel_size // 2,
+            bias=False
+        )
 
     def forward(self, x):
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
-        #00
+        x1, x2 = torch.split(
+            x, [self.dim_conv, self.dim_untouched], dim=1
+        )
+        return torch.cat([self.conv(x1), x2], dim=1)
+
+
+class FasterBottleneck(nn.Module):
+    """
+    Bottleneck using PConv instead of standard/Ghost conv
+    """
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3,3), e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.pconv = PConv(c_, n_div=2, kernel_size=k[1])
+        self.cv2 = Conv(c_, c2, 1, 1)  # pointwise projection
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        y = self.cv2(self.pconv(self.cv1(x)))
+        return x + y if self.add else y
+
+
+class C3k2_PConv(C2f):
+    """
+    Drop-in replacement for C3k2 using PConv bottlenecks
+    """
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            FasterBottleneck(self.c, self.c, shortcut, g, k=(3,3), e=1.0)
+            for _ in range(n)
+        )
+
+#Proposed>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+class CrackADown(nn.Module):
+    def __init__(self, c1, c2, **kwargs):
+        super().__init__()
+        assert c1 % 2 == 0, f"c1 ({c1}) must be even"
+        assert c2 % 2 == 0, f"c2 ({c2}) must be even"
+
+        c_ = c2 // 2
+        c_strip = c2 - c_
+        c_strip_h = c_strip // 2
+        c_strip_v = c_strip - c_strip_h
+
+        # Branch 1: standard ADown 3x3 strided conv
+        self.cv1 = Conv(c1 // 2, c_, 3, 2, 1)
+
+        # Branch 2: directional strip pooling
+        self.pool_h = nn.AvgPool2d((1, 3), stride=1, padding=(0, 1))
+        self.pool_v = nn.AvgPool2d((3, 1), stride=1, padding=(1, 0))
+        self.cv2 = Conv(c1 // 2, c_strip_h, 1, 1)
+        self.cv3 = Conv(c1 // 2, c_strip_v, 1, 1)
         
+        # 🔥 FIX: use strided Conv instead of AvgPool2d for downsampling
+        # This ensures SAME spatial output as branch 1 regardless of input size
+        self.cv2_down = Conv(c_strip_h, c_strip_h, 3, 2, 1)  # stride=2 with padding
+        self.cv3_down = Conv(c_strip_v, c_strip_v, 3, 2, 1)  # stride=2 with padding
+
+    def forward(self, x):
+        # Initial spatial smoothing (same as ADown)
+        x = torch.nn.functional.avg_pool2d(x, 2, 1, 0, False, True)
         
+        # Split channels
+        x1, x2 = x.chunk(2, 1)
+
+        # Branch 1: 3x3 strided conv
+        out1 = self.cv1(x1)
+
+        # Branch 2: directional strip pooling + strided conv
+        h = self.pool_h(x2)
+        out_h = self.cv2_down(self.cv2(h))  # 🔥 strided conv downsampling
+
+        v = self.pool_v(x2)
+        out_v = self.cv3_down(self.cv3(v))  # 🔥 strided conv downsampling
+
+        out2 = torch.cat([out_h, out_v], dim=1)
+
+        return torch.cat((out1, out2), dim=1)
+
+#C3k2_Crack >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+class C3k2_Crack(C2f):
+    """
+    C3k2 enhanced for crack feature recovery.
+    Used after CrackADown to compensate for
+    directional downsampling information loss.
+    
+    Adds a lightweight channel attention inside
+    the bottleneck to re-weight crack-relevant channels
+    that may be suppressed after downsampling.
+    """
+    def __init__(self, c1, c2, n=1, c3k=False, 
+                 e=0.5, g=1, shortcut=True):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            CrackBottleneck(self.c, self.c, shortcut, g, 
+                          k=(3,3), e=1.0)
+            for _ in range(n)
+        )
+
+class CrackBottleneck(nn.Module):
+    """
+    Bottleneck with lightweight channel attention
+    for crack feature recovery after downsampling.
+    """
+    def __init__(self, c1, c2, shortcut=True, 
+                 g=1, k=(3,3), e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
+        self.add = shortcut and c1 == c2
+        
+        # Lightweight channel attention
+        # Reweights channels after CrackADown
+        # Very cheap: just global pool + 2 FC
+        self.ca = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(c2, c2 // 4),
+            nn.SiLU(),
+            nn.Linear(c2 // 4, c2),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        y = self.cv2(self.cv1(x))
+        # Apply channel attention
+        w = self.ca(y).view(y.shape[0], -1, 1, 1)
+        y = y * w
+        return x + y if self.add else y
+
+
 class SAVPE(nn.Module):
     """Spatial-Aware Visual Prompt Embedding module for feature enhancement."""
 
