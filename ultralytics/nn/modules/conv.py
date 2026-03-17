@@ -8,7 +8,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 __all__ = (
     "Conv",
     "Conv2",
@@ -21,11 +21,13 @@ __all__ = (
     "ChannelAttention",
     "SpatialAttention",
     "CBAM",
+    "BasicConv",
+    "ChannelPool",
+    "SpatialGate",
+    "TripletAttention",
     "Concat",
-    "ASFF",
     "RepConv",
     "Index",
-    
 )
 
 
@@ -654,6 +656,61 @@ class CBAM(nn.Module):
         return self.spatial_attention(self.channel_attention(x))
 
 
+class BasicConv(nn.Module):
+    """Basic convolution with BN and ReLU for attention modules."""
+    def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, 
+                 dilation=1, groups=1, relu=True, bn=True, bias=False):
+        super(BasicConv, self).__init__()
+        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size,
+                            stride=stride, padding=padding, dilation=dilation,
+                            groups=groups, bias=bias)
+        self.bn = nn.BatchNorm2d(out_planes, eps=1e-5, momentum=0.01, affine=True) if bn else None
+        self.relu = nn.ReLU() if relu else None
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.bn is not None: x = self.bn(x)
+        if self.relu is not None: x = self.relu(x)
+        return x
+
+class ChannelPool(nn.Module):
+    """Helper for Triplet Attention."""
+    def forward(self, x):
+        return torch.cat((torch.max(x, 1)[0].unsqueeze(1), torch.mean(x, 1).unsqueeze(1)), dim=1)
+
+class SpatialGate(nn.Module):
+    """Spatial attention gate used in Triplet Attention."""
+    def __init__(self):
+        super(SpatialGate, self).__init__()
+        self.compress = ChannelPool()
+        self.spatial = BasicConv(2, 1, 7, stride=1, padding=3, relu=False)
+
+    def forward(self, x):
+        return x * torch.sigmoid(self.spatial(self.compress(x)))
+
+class TripletAttention(nn.Module):
+    """Triplet Attention: Cross-dimensional interaction (C, H, W)."""
+    def __init__(self, gate_channels=None, no_spatial=False):
+        super(TripletAttention, self).__init__()
+        self.ChannelGateH = SpatialGate()
+        self.ChannelGateW = SpatialGate()
+        self.no_spatial = no_spatial
+        if not no_spatial:
+            self.SpatialGate = SpatialGate()
+
+    def forward(self, x):
+        x_perm1 = x.permute(0, 2, 1, 3).contiguous()
+        x_out1 = self.ChannelGateH(x_perm1).permute(0, 2, 1, 3).contiguous()
+        
+        x_perm2 = x.permute(0, 3, 2, 1).contiguous()
+        x_out2 = self.ChannelGateW(x_perm2).permute(0, 3, 2, 1).contiguous()
+        
+        if not self.no_spatial:
+            x_out = self.SpatialGate(x)
+            return (1 / 3) * (x_out + x_out1 + x_out2)
+        return (1 / 2) * (x_out1 + x_out2)
+
+
 class Concat(nn.Module):
     """
     Concatenate a list of tensors along specified dimension.
@@ -685,162 +742,6 @@ class Concat(nn.Module):
         return torch.cat(x, self.d)
 
 
-
-
-# Add this import at the top of your conv.py if it's not already there:
-# import torch.nn.functional as F 
-# import torch 
-# (Based on your provided code, F is already imported, but ensure torch is too)
-
-
-# ----------------------------------------------------------------------
-# STEP 1: Define the helper function using your existing Conv module
-# ----------------------------------------------------------------------
-
-def add_conv(c1, c2, k, s, p=None, g=1, d=1, act=True):
-    """Maps the old 'add_conv' function to the modern Ultralytics 'Conv' module (C-B-SiLU)."""
-    return Conv(c1, c2, k=k, s=s, p=p, g=g, d=d, act=act)
-
-
-# ----------------------------------------------------------------------
-# STEP 2: The Adaptive Spatial Feature Fusion (ASFF) Module
-# ----------------------------------------------------------------------
-
-
-
-# NOTE: 'add_conv' must be defined or imported elsewhere in your code, 
-# as it's assumed to be a function that builds a Conv module (like a C2f block's Conv or a standard Conv/BN/Act block).
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-# NOTE: The 'add_conv' function (likely an alias for Conv/C2f, etc.) must be defined/imported externally
-
-class ASFF(nn.Module):
-    """
-    Adaptive Spatial Feature Fusion (ASFF) module for three-scale feature aggregation (P3, P4, P5).
-    Correctly implements channel alignment for all three inputs before fusion.
-    """
-    def __init__(self, level, in_channels_list, out_channels, rfb=False, vis=False):
-        super(ASFF, self).__init__()
-        self.level = level
-        self.vis = vis
-        
-        # --- Channel Configuration for THREE Inputs ---
-        C0, C1, C2 = in_channels_list 
-        self.inter_dim = out_channels  
-        
-        # --- Alignment Layers Setup ---
-        # ALL THREE features must have an alignment Conv to map to self.inter_dim
-
-        # Alignment for L0 (P3/256ch) - Used when L1 or L2 is the target
-        self.align_level_0 = add_conv(C0, self.inter_dim, 1, 1)
-
-        # Alignment for L1 (P4/512ch) - Used when L0 or L2 is the target
-        self.align_level_1 = add_conv(C1, self.inter_dim, 1, 1) 
-
-        # Alignment for L2 (P5/1024ch) - Used when L0 or L1 is the target
-        self.align_level_2 = add_conv(C2, self.inter_dim, 1, 1)
-
-        # --- Spatial Transformation Layers (Only for inputs that are NOT the target) ---
-        
-        if level == 2:  # Target: L2 (P5/Coarsest)
-            # L0 -> L2 (4x Up) and L1 -> L2 (2x Up) are done via F.interpolate in forward
-            pass 
-        
-        elif level == 1:  # Target: L1 (P4/Medium)
-            # L0 -> L1 (2x Down) is MaxPool in forward
-            # L2 -> L1 (2x Up) is F.interpolate in forward
-            pass
-            
-        elif level == 0:  # Target: L0 (P3/Finest)
-            # L1 -> L0 (2x Down) is MaxPool in forward
-            # L2 -> L0 (4x Down) is MaxPool + MaxPool/Conv in forward
-            pass
-            
-        self.expand = add_conv(self.inter_dim, out_channels, 3, 1)
-
-        # --- Weight Learning Layers (Expects self.inter_dim channels) ---
-        compress_c = 8 if rfb else 16 
-        
-        self.weight_level_0 = add_conv(self.inter_dim, compress_c, 1, 1)
-        self.weight_level_1 = add_conv(self.inter_dim, compress_c, 1, 1)
-        self.weight_level_2 = add_conv(self.inter_dim, compress_c, 1, 1)
-
-        # Final 1x1 Conv to output 3 channels
-        self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, padding=0)
-
-    def forward(self, x):
-        # 1. Unpack features
-        x_level_0, x_level_1, x_level_2 = x
-        
-        # 2. Channel Alignment (All features aligned to self.inter_dim)
-        # Assuming align_level_X maps from C_X to self.inter_dim (512, 256, etc.)
-        level_0_aligned = self.align_level_0(x_level_0)
-        level_1_aligned = self.align_level_1(x_level_1)
-        level_2_aligned = self.align_level_2(x_level_2)
-        
-        # 3. Spatial Resizing to Target Resolution (self.level)
-
-        if self.level == 2:  # Target: L2 (P5/Coarsest)
-            target_size = x_level_2.shape[-2:]
-            
-            # L0 (P3) -> L2 (P5) - 4x Downsample
-            level_0_resized = F.interpolate(level_0_aligned, size=target_size, mode='nearest')
-            
-            # L1 (P4) -> L2 (P5) - 2x Downsample
-            level_1_resized = F.interpolate(level_1_aligned, size=target_size, mode='nearest')
-            
-            level_2_resized = level_2_aligned # L2 is target
-
-        elif self.level == 1:  # Target: L1 (P4/Medium)
-            target_size = x_level_1.shape[-2:]
-            
-            # L0 (P3) -> L1 (P4) - 2x Downsample
-            level_0_resized = F.interpolate(level_0_aligned, size=target_size, mode='nearest')
-            
-            level_1_resized = level_1_aligned # L1 is target
-            
-            # L2 (P5) -> L1 (P4) - 2x Upsample
-            level_2_resized = F.interpolate(level_2_aligned, size=target_size, mode='nearest')
-
-        elif self.level == 0:  # Target: L0 (P3/Finest)
-            target_size = x_level_0.shape[-2:]
-            
-            level_0_resized = level_0_aligned # L0 is target
-            
-            # L1 (P4) -> L0 (P3) - 2x Upsample
-            level_1_resized = F.interpolate(level_1_aligned, size=target_size, mode='nearest')
-            
-            # L2 (P5) -> L0 (P3) - 4x Upsample
-            level_2_resized = F.interpolate(level_2_aligned, size=target_size, mode='nearest')
-            
-        # --- Step 4: Adaptive Weight Calculation ---
-        # All inputs are now guaranteed to have the same spatial size (target_size)
-        level_0_weight_v = self.weight_level_0(level_0_resized)
-        level_1_weight_v = self.weight_level_1(level_1_resized)
-        level_2_weight_v = self.weight_level_2(level_2_resized)
-
-        # THIS CONCATENATION WILL NOW WORK 
-        levels_weight_v = torch.cat((level_0_weight_v, level_1_weight_v, level_2_weight_v), 1)
-        # ... (rest of the forward pass)
-        
-        levels_weight = self.weight_levels(levels_weight_v)
-        levels_weight = F.softmax(levels_weight, dim=1)
-
-        # --- Step 5: Weighted Sum Fusion ---
-        fused_out_reduced = level_0_resized * levels_weight[:, 0:1, :, :] + \
-                            level_1_resized * levels_weight[:, 1:2, :, :] + \
-                            level_2_resized * levels_weight[:, 2:, :, :]
-
-        # --- Step 6: Final Expansion/Refinement ---
-        out = self.expand(fused_out_reduced)
-
-        if self.vis:
-            return out, levels_weight, fused_out_reduced.sum(dim=1)
-        else:
-            return out
 class Index(nn.Module):
     """
     Returns a particular index of the input.
